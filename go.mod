@@ -8,8 +8,8 @@ require (
 )
 
 require (
-	github.com/meshcore-go/meshcore-go/companion/transport v0.0.0
-	github.com/meshcore-go/meshcore-go/hardware/transport v0.0.0
+	github.com/meshcore-go/meshcore-go/companion/transport v1.0.0
+	github.com/meshcore-go/meshcore-go/hardware/transport v1.0.0
 )
 
 require (
