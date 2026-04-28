@@ -1,0 +1,605 @@
+package companion
+
+import "encoding/binary"
+
+type AppStartCommand struct {
+	AppVersion byte
+	AppName    string
+}
+
+func (c AppStartCommand) ToBytes() []byte {
+	name := []byte(c.AppName)
+	buf := make([]byte, 8+len(name))
+	buf[0] = CmdAppStart
+	buf[1] = c.AppVersion
+	copy(buf[8:], name)
+	return buf
+}
+
+type DeviceQueryCommand struct {
+	AppTargetVersion byte
+}
+
+func (c DeviceQueryCommand) ToBytes() []byte {
+	return []byte{CmdDeviceQuery, c.AppTargetVersion}
+}
+
+type GetBatteryVoltageCommand struct{}
+
+func (GetBatteryVoltageCommand) ToBytes() []byte {
+	return []byte{CmdGetBatteryVoltage}
+}
+
+type SyncNextMessageCommand struct{}
+
+func (SyncNextMessageCommand) ToBytes() []byte {
+	return []byte{CmdSyncNextMessage}
+}
+
+type SendTxtMsgCommand struct {
+	TxtType         byte
+	Attempt         byte
+	SenderTimestamp uint32
+	PubKeyPrefix    [6]byte
+	Text            string
+}
+
+func (c SendTxtMsgCommand) ToBytes() []byte {
+	text := []byte(c.Text)
+	buf := make([]byte, 13+len(text))
+	buf[0] = CmdSendTxtMsg
+	buf[1] = c.TxtType
+	buf[2] = c.Attempt
+	binary.LittleEndian.PutUint32(buf[3:7], c.SenderTimestamp)
+	copy(buf[7:13], c.PubKeyPrefix[:])
+	copy(buf[13:], text)
+	return buf
+}
+
+type SendChannelTxtMsgCommand struct {
+	TxtType         byte
+	ChannelIdx      byte
+	SenderTimestamp uint32
+	Text            string
+}
+
+func (c SendChannelTxtMsgCommand) ToBytes() []byte {
+	text := []byte(c.Text)
+	buf := make([]byte, 7+len(text))
+	buf[0] = CmdSendChannelTxtMsg
+	buf[1] = c.TxtType
+	buf[2] = c.ChannelIdx
+	binary.LittleEndian.PutUint32(buf[3:7], c.SenderTimestamp)
+	copy(buf[7:], text)
+	return buf
+}
+
+type GetContactsCommand struct {
+	Since    uint32
+	HasSince bool
+}
+
+func (c GetContactsCommand) ToBytes() []byte {
+	if !c.HasSince {
+		return []byte{CmdGetContacts}
+	}
+
+	buf := make([]byte, 5)
+	buf[0] = CmdGetContacts
+	binary.LittleEndian.PutUint32(buf[1:5], c.Since)
+	return buf
+}
+
+type AddUpdateContactCommand struct {
+	PublicKey [32]byte
+	Name      string
+}
+
+func (c AddUpdateContactCommand) ToBytes() []byte {
+	buf := make([]byte, 65)
+	buf[0] = CmdAddUpdateContact
+	copy(buf[1:33], c.PublicKey[:])
+
+	nameBytes := []byte(c.Name)
+	if len(nameBytes) > 31 {
+		nameBytes = nameBytes[:31]
+	}
+	copy(buf[33:65], nameBytes)
+
+	return buf
+}
+
+type RemoveContactCommand struct {
+	PubKeyPrefix [6]byte
+}
+
+func (c RemoveContactCommand) ToBytes() []byte {
+	buf := make([]byte, 7)
+	buf[0] = CmdRemoveContact
+	copy(buf[1:7], c.PubKeyPrefix[:])
+	return buf
+}
+
+type GetChannelCommand struct {
+	ChannelIdx byte
+}
+
+func (c GetChannelCommand) ToBytes() []byte {
+	return []byte{CmdGetChannel, c.ChannelIdx}
+}
+
+type SetChannelCommand struct {
+	ChannelIdx byte
+	Name       string
+	Secret     [16]byte
+}
+
+func (c SetChannelCommand) ToBytes() []byte {
+	buf := make([]byte, 50)
+	buf[0] = CmdSetChannel
+	buf[1] = c.ChannelIdx
+
+	nameBytes := []byte(c.Name)
+	if len(nameBytes) > 31 {
+		nameBytes = nameBytes[:31]
+	}
+	copy(buf[2:34], nameBytes)
+
+	copy(buf[34:50], c.Secret[:])
+	return buf
+}
+
+type GetDeviceTimeCommand struct{}
+
+func (GetDeviceTimeCommand) ToBytes() []byte {
+	return []byte{CmdGetDeviceTime}
+}
+
+type SetDeviceTimeCommand struct {
+	EpochSecs uint32
+}
+
+func (c SetDeviceTimeCommand) ToBytes() []byte {
+	buf := make([]byte, 5)
+	buf[0] = CmdSetDeviceTime
+	binary.LittleEndian.PutUint32(buf[1:5], c.EpochSecs)
+	return buf
+}
+
+type SendSelfAdvertCommand struct {
+	AdvertType byte
+}
+
+func (c SendSelfAdvertCommand) ToBytes() []byte {
+	return []byte{CmdSendSelfAdvert, c.AdvertType}
+}
+
+type SetAdvertNameCommand struct {
+	Name string
+}
+
+func (c SetAdvertNameCommand) ToBytes() []byte {
+	name := []byte(c.Name)
+	buf := make([]byte, 1+len(name))
+	buf[0] = CmdSetAdvertName
+	copy(buf[1:], name)
+	return buf
+}
+
+type SetRadioParamsCommand struct {
+	Frequency    uint32
+	Bandwidth    uint32
+	SpreadFactor byte
+	CodingRate   byte
+}
+
+func (c SetRadioParamsCommand) ToBytes() []byte {
+	buf := make([]byte, 11)
+	buf[0] = CmdSetRadioParams
+	binary.LittleEndian.PutUint32(buf[1:5], c.Frequency)
+	binary.LittleEndian.PutUint32(buf[5:9], c.Bandwidth)
+	buf[9] = c.SpreadFactor
+	buf[10] = c.CodingRate
+	return buf
+}
+
+type SetTxPowerCommand struct {
+	TxPower byte
+}
+
+func (c SetTxPowerCommand) ToBytes() []byte {
+	return []byte{CmdSetTxPower, c.TxPower}
+}
+
+type ResetPathCommand struct {
+	PublicKey [32]byte
+}
+
+func (c ResetPathCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdResetPath
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type SetAdvertLatLonCommand struct {
+	Latitude  int32
+	Longitude int32
+}
+
+func (c SetAdvertLatLonCommand) ToBytes() []byte {
+	buf := make([]byte, 9)
+	buf[0] = CmdSetAdvertLatLon
+	binary.LittleEndian.PutUint32(buf[1:5], uint32(c.Latitude))
+	binary.LittleEndian.PutUint32(buf[5:9], uint32(c.Longitude))
+	return buf
+}
+
+type ShareContactCommand struct {
+	PublicKey [32]byte
+}
+
+func (c ShareContactCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdShareContact
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type ExportContactCommand struct {
+	PublicKey [32]byte
+}
+
+func (c ExportContactCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdExportContact
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type ImportContactCommand struct {
+	AdvertData []byte
+}
+
+func (c ImportContactCommand) ToBytes() []byte {
+	buf := make([]byte, 1+len(c.AdvertData))
+	buf[0] = CmdImportContact
+	copy(buf[1:], c.AdvertData)
+	return buf
+}
+
+type RebootCommand struct{}
+
+func (RebootCommand) ToBytes() []byte {
+	return []byte{CmdReboot, 'r', 'e', 'b', 'o', 'o', 't'}
+}
+
+type ExportPrivateKeyCommand struct{}
+
+func (ExportPrivateKeyCommand) ToBytes() []byte {
+	return []byte{CmdExportPrivateKey}
+}
+
+type ImportPrivateKeyCommand struct {
+	PrivateKey [64]byte
+}
+
+func (c ImportPrivateKeyCommand) ToBytes() []byte {
+	buf := make([]byte, 65)
+	buf[0] = CmdImportPrivateKey
+	copy(buf[1:65], c.PrivateKey[:])
+	return buf
+}
+
+type SendRawDataCommand struct {
+	Path    []byte
+	RawData []byte
+}
+
+func (c SendRawDataCommand) ToBytes() []byte {
+	buf := make([]byte, 2+len(c.Path)+len(c.RawData))
+	buf[0] = CmdSendRawData
+	buf[1] = byte(len(c.Path))
+	copy(buf[2:2+len(c.Path)], c.Path)
+	copy(buf[2+len(c.Path):], c.RawData)
+	return buf
+}
+
+type SendLoginCommand struct {
+	PublicKey [32]byte
+	Password  string
+}
+
+func (c SendLoginCommand) ToBytes() []byte {
+	password := []byte(c.Password)
+	buf := make([]byte, 33+len(password))
+	buf[0] = CmdSendLogin
+	copy(buf[1:33], c.PublicKey[:])
+	copy(buf[33:], password)
+	return buf
+}
+
+type SendStatusReqCommand struct {
+	PublicKey [32]byte
+}
+
+func (c SendStatusReqCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdSendStatusReq
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type HasConnectionCommand struct {
+	PublicKey [32]byte
+}
+
+func (c HasConnectionCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdHasConnection
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type LogoutCommand struct {
+	PublicKey [32]byte
+}
+
+func (c LogoutCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdLogout
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type GetContactByKeyCommand struct {
+	PublicKey [32]byte
+}
+
+func (c GetContactByKeyCommand) ToBytes() []byte {
+	buf := make([]byte, 33)
+	buf[0] = CmdGetContactByKey
+	copy(buf[1:33], c.PublicKey[:])
+	return buf
+}
+
+type SignStartCommand struct{}
+
+func (SignStartCommand) ToBytes() []byte {
+	return []byte{CmdSignStart}
+}
+
+type SignDataCommand struct {
+	Data []byte
+}
+
+func (c SignDataCommand) ToBytes() []byte {
+	buf := make([]byte, 1+len(c.Data))
+	buf[0] = CmdSignData
+	copy(buf[1:], c.Data)
+	return buf
+}
+
+type SignFinishCommand struct{}
+
+func (SignFinishCommand) ToBytes() []byte {
+	return []byte{CmdSignFinish}
+}
+
+type SendTracePathCommand struct {
+	Tag   uint32
+	Auth  uint32
+	Flags byte
+	Path  []byte
+}
+
+func (c SendTracePathCommand) ToBytes() []byte {
+	buf := make([]byte, 10+len(c.Path))
+	buf[0] = CmdSendTracePath
+	binary.LittleEndian.PutUint32(buf[1:5], c.Tag)
+	binary.LittleEndian.PutUint32(buf[5:9], c.Auth)
+	buf[9] = c.Flags
+	copy(buf[10:], c.Path)
+	return buf
+}
+
+type SetDevicePinCommand struct {
+	Pin uint32
+}
+
+func (c SetDevicePinCommand) ToBytes() []byte {
+	buf := make([]byte, 5)
+	buf[0] = CmdSetDevicePin
+	binary.LittleEndian.PutUint32(buf[1:5], c.Pin)
+	return buf
+}
+
+type SetOtherParamsCommand struct {
+	ManualAddContacts byte
+}
+
+func (c SetOtherParamsCommand) ToBytes() []byte {
+	return []byte{CmdSetOtherParams, c.ManualAddContacts}
+}
+
+type SendTelemetryReqCommand struct {
+	PublicKey [32]byte
+}
+
+func (c SendTelemetryReqCommand) ToBytes() []byte {
+	buf := make([]byte, 36)
+	buf[0] = CmdSendTelemetryReq
+	copy(buf[4:36], c.PublicKey[:])
+	return buf
+}
+
+type GetCustomVarsCommand struct{}
+
+func (GetCustomVarsCommand) ToBytes() []byte {
+	return []byte{CmdGetCustomVars}
+}
+
+type SetCustomVarCommand struct {
+	Name  string
+	Value string
+}
+
+func (c SetCustomVarCommand) ToBytes() []byte {
+	nameValue := []byte(c.Name + ":" + c.Value)
+	buf := make([]byte, 2+len(nameValue))
+	buf[0] = CmdSetCustomVar
+	copy(buf[1:], nameValue)
+	buf[len(buf)-1] = 0
+	return buf
+}
+
+type GetAdvertPathCommand struct {
+	PublicKey [32]byte
+}
+
+func (c GetAdvertPathCommand) ToBytes() []byte {
+	buf := make([]byte, 34)
+	buf[0] = CmdGetAdvertPath
+	copy(buf[2:34], c.PublicKey[:])
+	return buf
+}
+
+type SendBinaryReqCommand struct {
+	PublicKey   [32]byte
+	RequestData []byte
+}
+
+func (c SendBinaryReqCommand) ToBytes() []byte {
+	buf := make([]byte, 33+len(c.RequestData))
+	buf[0] = CmdSendBinaryReq
+	copy(buf[1:33], c.PublicKey[:])
+	copy(buf[33:], c.RequestData)
+	return buf
+}
+
+type FactoryResetCommand struct{}
+
+func (FactoryResetCommand) ToBytes() []byte {
+	return []byte{CmdFactoryReset, 'r', 'e', 's', 'e', 't'}
+}
+
+type SendPathDiscoveryReqCommand struct {
+	PublicKey [32]byte
+}
+
+func (c SendPathDiscoveryReqCommand) ToBytes() []byte {
+	buf := make([]byte, 34)
+	buf[0] = CmdSendPathDiscoveryReq
+	copy(buf[2:34], c.PublicKey[:])
+	return buf
+}
+
+type SetFloodScopeCommand struct {
+	TransportKey []byte
+}
+
+func (c SetFloodScopeCommand) ToBytes() []byte {
+	buf := make([]byte, 2+len(c.TransportKey))
+	buf[0] = CmdSetFloodScope
+	copy(buf[2:], c.TransportKey)
+	return buf
+}
+
+type SendControlDataCommand struct {
+	ControlData []byte
+}
+
+func (c SendControlDataCommand) ToBytes() []byte {
+	buf := make([]byte, 1+len(c.ControlData))
+	buf[0] = CmdSendControlData
+	copy(buf[1:], c.ControlData)
+	return buf
+}
+
+type GetStatsCommand struct {
+	StatsType byte
+}
+
+func (c GetStatsCommand) ToBytes() []byte {
+	return []byte{CmdGetStats, c.StatsType}
+}
+
+type SendAnonReqCommand struct {
+	PublicKey   [32]byte
+	RequestData []byte
+}
+
+func (c SendAnonReqCommand) ToBytes() []byte {
+	buf := make([]byte, 33+len(c.RequestData))
+	buf[0] = CmdSendAnonReq
+	copy(buf[1:33], c.PublicKey[:])
+	copy(buf[33:], c.RequestData)
+	return buf
+}
+
+type SetAutoAddConfigCommand struct {
+	Config  byte
+	MaxHops byte
+}
+
+func (c SetAutoAddConfigCommand) ToBytes() []byte {
+	return []byte{CmdSetAutoAddConfig, c.Config, c.MaxHops}
+}
+
+type GetAutoAddConfigCommand struct{}
+
+func (GetAutoAddConfigCommand) ToBytes() []byte {
+	return []byte{CmdGetAutoAddConfig}
+}
+
+type GetAllowedRepeatFreqCommand struct{}
+
+func (GetAllowedRepeatFreqCommand) ToBytes() []byte {
+	return []byte{CmdGetAllowedRepeatFreq}
+}
+
+type SetPathHashModeCommand struct {
+	Mode byte
+}
+
+func (c SetPathHashModeCommand) ToBytes() []byte {
+	return []byte{CmdSetPathHashMode, 0x00, c.Mode}
+}
+
+type SendChannelDataCommand struct {
+	ChannelIdx byte
+	Path       []byte
+	DataType   uint16
+	Payload    []byte
+}
+
+func (c SendChannelDataCommand) ToBytes() []byte {
+	buf := make([]byte, 5+len(c.Path)+len(c.Payload))
+	buf[0] = CmdSendChannelData
+	buf[1] = c.ChannelIdx
+	buf[2] = byte(len(c.Path))
+	copy(buf[3:3+len(c.Path)], c.Path)
+	dataTypeOffset := 3 + len(c.Path)
+	binary.LittleEndian.PutUint16(buf[dataTypeOffset:dataTypeOffset+2], c.DataType)
+	copy(buf[dataTypeOffset+2:], c.Payload)
+	return buf
+}
+
+type SetTuningParamsCommand struct {
+	RxDelayBase   float32
+	AirtimeFactor float32
+}
+
+func (c SetTuningParamsCommand) ToBytes() []byte {
+	buf := make([]byte, 9)
+	buf[0] = CmdSetTuningParams
+	binary.LittleEndian.PutUint32(buf[1:5], uint32(c.RxDelayBase*1000))
+	binary.LittleEndian.PutUint32(buf[5:9], uint32(c.AirtimeFactor*1000))
+	return buf
+}
+
+type GetTuningParamsCommand struct{}
+
+func (GetTuningParamsCommand) ToBytes() []byte {
+	return []byte{CmdGetTuningParams}
+}

@@ -1,0 +1,270 @@
+package meshcore
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/binary"
+	"fmt"
+)
+
+type AdvertAppData struct {
+	Type  string
+	Name  string
+	Lat   int32  // Little Endian
+	Lon   int32  // Little Endian
+	Feat1 uint16 // Little Endian
+	Feat2 uint16 // Little Endian
+}
+
+func (a *AdvertAppData) ToBytes() ([]byte, error) {
+	var typeByte byte
+
+	switch a.Type {
+	case "NONE":
+		typeByte = AdvertTypeNone
+	case "CHAT":
+		typeByte = AdvertTypeChat
+	case "REPEATER":
+		typeByte = AdvertTypeRepeater
+	case "ROOM":
+		typeByte = AdvertTypeRoom
+	case "SENSOR":
+		typeByte = AdvertTypeSensor
+	default:
+		return nil, fmt.Errorf("unknown advert type: %q", a.Type)
+	}
+
+	flags := typeByte
+	if a.Lat != 0 || a.Lon != 0 {
+		flags |= AdvertLatLonMask
+	}
+	if a.Feat1 != 0 {
+		flags |= AdvertFeat1Mask
+	}
+	if a.Feat2 != 0 {
+		flags |= AdvertFeat2Mask
+	}
+	if a.Name != "" {
+		flags |= AdvertNameMask
+	}
+
+	buffer := bytes.NewBuffer(nil)
+	if err := buffer.WriteByte(flags); err != nil {
+		return nil, fmt.Errorf("writing flags: %w", err)
+	}
+
+	if flags&AdvertLatLonMask > 0 {
+		if err := binary.Write(buffer, binary.LittleEndian, a.Lat); err != nil {
+			return nil, fmt.Errorf("writing lat: %w", err)
+		}
+
+		if err := binary.Write(buffer, binary.LittleEndian, a.Lon); err != nil {
+			return nil, fmt.Errorf("writing lon: %w", err)
+		}
+	}
+
+	if flags&AdvertFeat1Mask > 0 {
+		if err := binary.Write(buffer, binary.LittleEndian, a.Feat1); err != nil {
+			return nil, fmt.Errorf("writing feat1: %w", err)
+		}
+	}
+
+	if flags&AdvertFeat2Mask > 0 {
+		if err := binary.Write(buffer, binary.LittleEndian, a.Feat2); err != nil {
+			return nil, fmt.Errorf("writing feat2: %w", err)
+		}
+	}
+
+	if flags&AdvertNameMask > 0 {
+		if _, err := buffer.Write([]byte(a.Name)); err != nil {
+			return nil, fmt.Errorf("writing name: %w", err)
+		}
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func AdvertAppDataFromBytes(data []byte) (*AdvertAppData, error) {
+	advertAppData := &AdvertAppData{}
+	buffer := bytes.NewBuffer(data)
+
+	// Read Flags
+	flags, flagsErr := buffer.ReadByte()
+	if flagsErr != nil {
+		return nil, flagsErr
+	}
+
+	// Parse type from lower 4 bits of flags
+	switch flags & 0x0F {
+	case AdvertTypeNone:
+		advertAppData.Type = "NONE"
+	case AdvertTypeChat:
+		advertAppData.Type = "CHAT"
+	case AdvertTypeRepeater:
+		advertAppData.Type = "REPEATER"
+	case AdvertTypeRoom:
+		advertAppData.Type = "ROOM"
+	case AdvertTypeSensor:
+		advertAppData.Type = "SENSOR"
+	}
+
+	// Parse lat lon
+	if flags&AdvertLatLonMask > 0 {
+		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Lat); err != nil {
+			return nil, fmt.Errorf("reading lat: %w", err)
+		}
+
+		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Lon); err != nil {
+			return nil, fmt.Errorf("reading lon: %w", err)
+		}
+	}
+
+	if flags&AdvertFeat1Mask > 0 {
+		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Feat1); err != nil {
+			return nil, fmt.Errorf("reading feat1: %w", err)
+		}
+	}
+
+	if flags&AdvertFeat2Mask > 0 {
+		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Feat2); err != nil {
+			return nil, fmt.Errorf("reading feat2: %w", err)
+		}
+	}
+
+	// parse name (remainder of app data)
+	if flags&AdvertNameMask > 0 {
+		advertAppData.Name = buffer.String()
+	}
+
+	return advertAppData, nil
+}
+
+type Advert struct {
+	PublicKey  Identity
+	Timestamp  uint32 // Little Endian
+	Signature  []byte // 64 bytes
+	RawAppData []byte
+
+	parsedAppData AdvertAppData
+}
+
+func AdvertFromBytes(data []byte) (*Advert, error) {
+	if len(data) < MinAdvertSize {
+		return nil, fmt.Errorf("advert too short: %d bytes, minimum %d", len(data), MinAdvertSize)
+	}
+
+	advert := &Advert{}
+	buffer := bytes.NewBuffer(data)
+
+	pubKeyID, err := NewIdentityFromBytes(buffer.Next(PubKeySize))
+	if err != nil {
+		return nil, fmt.Errorf("reading public key: %w", err)
+	}
+	advert.PublicKey = pubKeyID
+
+	if err := binary.Read(buffer, binary.LittleEndian, &advert.Timestamp); err != nil {
+		return nil, fmt.Errorf("reading timestamp: %w", err)
+	}
+
+	advert.Signature = buffer.Next(SignatureSize)
+
+	advert.RawAppData = buffer.Bytes()
+
+	if len(advert.RawAppData) > MaxAdvertDataSize {
+		return nil, fmt.Errorf("advert app data too large: %d bytes, max %d", len(advert.RawAppData), MaxAdvertDataSize)
+	}
+
+	if len(advert.RawAppData) > 0 {
+		parsedAppData, err := AdvertAppDataFromBytes(advert.RawAppData)
+		if err != nil {
+			return nil, err
+		}
+		advert.parsedAppData = *parsedAppData
+	}
+
+	return advert, nil
+}
+
+func (a *Advert) Flags() byte {
+	if len(a.RawAppData) == 0 {
+		return 0
+	}
+	return a.RawAppData[0]
+}
+
+func (a *Advert) Type() byte {
+	flags := a.Flags()
+	return flags & 0x0F
+}
+
+func (a *Advert) TypeString() string {
+	t := a.Type()
+	switch t {
+	case AdvertTypeNone:
+		return "NONE"
+	case AdvertTypeChat:
+		return "CHAT"
+	case AdvertTypeRepeater:
+		return "REPEATER"
+	case AdvertTypeRoom:
+		return "ROOM"
+	case AdvertTypeSensor:
+		return "SENSOR"
+	default:
+		return ""
+	}
+}
+
+func (a *Advert) AppData() AdvertAppData {
+	return a.parsedAppData
+}
+
+func (a *Advert) ToBytes() ([]byte, error) {
+	buffer := bytes.NewBuffer(nil)
+
+	if _, err := buffer.Write(a.PublicKey.PublicKeyBytes()); err != nil {
+		return nil, fmt.Errorf("writing public key: %w", err)
+	}
+
+	if err := binary.Write(buffer, binary.LittleEndian, a.Timestamp); err != nil {
+		return nil, fmt.Errorf("writing timestamp: %w", err)
+	}
+
+	if _, err := buffer.Write(a.Signature); err != nil {
+		return nil, fmt.Errorf("writing signature: %w", err)
+	}
+
+	if _, err := buffer.Write(a.RawAppData); err != nil {
+		return nil, fmt.Errorf("writing raw app data: %w", err)
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func (a *Advert) Sign(privateKey ed25519.PrivateKey) {
+	var signedData []byte
+
+	signedData = append(signedData, a.PublicKey.PublicKeyBytes()...)
+
+	ts := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ts, a.Timestamp)
+	signedData = append(signedData, ts...)
+
+	signedData = append(signedData, a.RawAppData...)
+
+	a.Signature = ed25519.Sign(privateKey, signedData)
+}
+
+func (a *Advert) Verify() bool {
+	var signedData []byte
+
+	signedData = append(signedData, a.PublicKey.PublicKeyBytes()...)
+
+	ts := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ts, a.Timestamp)
+	signedData = append(signedData, ts...)
+
+	signedData = append(signedData, a.RawAppData...)
+
+	return a.PublicKey.Verify(signedData, a.Signature)
+}

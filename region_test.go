@@ -1,0 +1,181 @@
+package meshcore
+
+import (
+	"testing"
+)
+
+func TestDeriveRegionKey_Deterministic(t *testing.T) {
+	k1 := DeriveRegionKey("#ch-fr")
+	k2 := DeriveRegionKey("#ch-fr")
+	if k1 != k2 {
+		t.Error("same name should produce same key")
+	}
+}
+
+func TestDeriveRegionKey_DifferentNames(t *testing.T) {
+	k1 := DeriveRegionKey("#ch-fr")
+	k2 := DeriveRegionKey("#us-west")
+	if k1 == k2 {
+		t.Error("different names should produce different keys")
+	}
+}
+
+func TestRegionKey_IsZero(t *testing.T) {
+	var zero RegionKey
+	if !zero.IsZero() {
+		t.Error("zero key should be zero")
+	}
+	k := DeriveRegionKey("#test")
+	if k.IsZero() {
+		t.Error("derived key should not be zero")
+	}
+}
+
+func TestRegionKey_CalcTransportCode_Deterministic(t *testing.T) {
+	key := DeriveRegionKey("#ch-fr")
+	c1 := key.CalcTransportCode(PayloadTypeTxtMsg, []byte{0x01, 0x02})
+	c2 := key.CalcTransportCode(PayloadTypeTxtMsg, []byte{0x01, 0x02})
+	if c1 != c2 {
+		t.Errorf("same inputs should produce same code: got %04X and %04X", c1, c2)
+	}
+}
+
+func TestRegionKey_CalcTransportCode_DifferentPayloads(t *testing.T) {
+	key := DeriveRegionKey("#ch-fr")
+	c1 := key.CalcTransportCode(PayloadTypeTxtMsg, []byte{0x01, 0x02})
+	c2 := key.CalcTransportCode(PayloadTypeTxtMsg, []byte{0x03, 0x04})
+	if c1 == c2 {
+		t.Error("different payloads should produce different codes")
+	}
+}
+
+func TestRegionKey_CalcTransportCode_DifferentPayloadTypes(t *testing.T) {
+	key := DeriveRegionKey("#ch-fr")
+	payload := []byte{0x01, 0x02, 0x03}
+	c1 := key.CalcTransportCode(PayloadTypeTxtMsg, payload)
+	c2 := key.CalcTransportCode(PayloadTypeAdvert, payload)
+	if c1 == c2 {
+		t.Error("different payload types should produce different codes")
+	}
+}
+
+func TestRegionKey_CalcTransportCode_DifferentKeys(t *testing.T) {
+	k1 := DeriveRegionKey("#ch-fr")
+	k2 := DeriveRegionKey("#us-west")
+	payload := []byte{0x01, 0x02, 0x03}
+	c1 := k1.CalcTransportCode(PayloadTypeTxtMsg, payload)
+	c2 := k2.CalcTransportCode(PayloadTypeTxtMsg, payload)
+	if c1 == c2 {
+		t.Error("different keys should produce different codes")
+	}
+}
+
+func TestRegionKey_CalcTransportCode_NotReserved(t *testing.T) {
+	// Run many iterations — codes 0x0000 and 0xFFFF should never appear.
+	key := DeriveRegionKey("#test-reserved")
+	for i := 0; i < 1000; i++ {
+		payload := []byte{byte(i >> 8), byte(i)}
+		code := key.CalcTransportCode(PayloadTypeTxtMsg, payload)
+		if code == 0x0000 {
+			t.Fatalf("code 0x0000 should be reserved (i=%d)", i)
+		}
+		if code == 0xFFFF {
+			t.Fatalf("code 0xFFFF should be reserved (i=%d)", i)
+		}
+	}
+}
+
+func TestNewRegionFromHashtag(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantName string
+	}{
+		{"#ch-fr", "#ch-fr"},
+		{"ch-fr", "#ch-fr"},
+		{"$private", "$private"},
+	}
+	for _, tt := range tests {
+		r := NewRegionFromHashtag(tt.input)
+		if r.Name != tt.wantName {
+			t.Errorf("NewRegionFromHashtag(%q).Name = %q, want %q", tt.input, r.Name, tt.wantName)
+		}
+		if r.Key.IsZero() {
+			t.Errorf("NewRegionFromHashtag(%q).Key should not be zero", tt.input)
+		}
+	}
+}
+
+func TestRegion_MatchesPacket(t *testing.T) {
+	r := NewRegionFromHashtag("#ch-fr")
+	payload := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	payloadType := PayloadTypeTxtMsg
+
+	code := r.Key.CalcTransportCode(payloadType, payload)
+
+	pkt := &Packet{
+		Header:         MakeHeader(RouteTypeTransportFlood, payloadType, 0),
+		PathLength:     0,
+		Payload:        payload,
+		TransportCode1: code,
+	}
+
+	if !r.MatchesPacket(pkt) {
+		t.Error("region should match packet with correct transport code")
+	}
+
+	pkt.TransportCode1 = code + 1
+	if r.MatchesPacket(pkt) {
+		t.Error("region should not match packet with wrong transport code")
+	}
+}
+
+func TestRegion_MatchesPacket_NonTransportReturnsFalse(t *testing.T) {
+	r := NewRegionFromHashtag("#ch-fr")
+	pkt := &Packet{
+		Header:     MakeHeader(RouteTypeFlood, PayloadTypeTxtMsg, 0),
+		PathLength: 0,
+		Payload:    []byte{0x01},
+	}
+	if r.MatchesPacket(pkt) {
+		t.Error("non-transport packet should not match any region")
+	}
+}
+
+func TestRegion_DenyFlags(t *testing.T) {
+	r := &Region{Flags: 0}
+	if r.DenyFlood() {
+		t.Error("no flags set should not deny flood")
+	}
+	if r.DenyDirect() {
+		t.Error("no flags set should not deny direct")
+	}
+
+	r.Flags = RegionDenyFlood
+	if !r.DenyFlood() {
+		t.Error("DENY_FLOOD set should deny flood")
+	}
+	if r.DenyDirect() {
+		t.Error("only DENY_FLOOD set should not deny direct")
+	}
+
+	r.Flags = RegionDenyFlood | RegionDenyDirect
+	if !r.DenyFlood() || !r.DenyDirect() {
+		t.Error("both flags set should deny both")
+	}
+}
+
+func TestIsValidRegionNameChar(t *testing.T) {
+	valid := []byte{'-', '$', '#', '0', '9', 'A', 'Z', 'a', 'z'}
+	for _, c := range valid {
+		if !IsValidRegionNameChar(c) {
+			t.Errorf("expected %q to be valid", c)
+		}
+	}
+
+	invalid := []byte{' ', '!', '@', '.', ',', '/', '(', ')'}
+	for _, c := range invalid {
+		if IsValidRegionNameChar(c) {
+			t.Errorf("expected %q to be invalid", c)
+		}
+	}
+}

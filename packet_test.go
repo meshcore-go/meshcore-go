@@ -1,0 +1,588 @@
+package meshcore
+
+import (
+	"encoding/hex"
+	"strings"
+	"testing"
+)
+
+func TestPacketFromBytes(t *testing.T) {
+	tests := []struct {
+		name              string
+		hex               string
+		wantErr           bool
+		wantRouteType     byte
+		wantRouteString   string
+		wantPayloadType   byte
+		wantPayloadString string
+		wantPayloadVer    byte
+		wantPath          string // hex
+		wantPayload       string // hex
+		wantTC1           uint16
+		wantTC2           uint16
+		wantPathHashSize  uint8
+		wantPathHashCount uint8
+		wantPathHashes    []string // hex per hash
+	}{
+		{
+			name:              "direct anon_req",
+			hex:               "1E03FB028BB7403537145668C6B670B74DF85583B557173E03EEE24C2642145B17272946D3CF048D7B71846BEAE7F18D0C91885F5D54463C",
+			wantRouteType:     RouteTypeDirect,
+			wantRouteString:   "DIRECT",
+			wantPayloadType:   PayloadTypeAnonReq,
+			wantPayloadString: "ANON_REQ",
+			wantPayloadVer:    0,
+			wantPathHashSize:  1,
+			wantPathHashCount: 3,
+			wantPath:          "FB028B",
+			wantPathHashes:    []string{"FB", "02", "8B"},
+			wantPayload:       "B7403537145668C6B670B74DF85583B557173E03EEE24C2642145B17272946D3CF048D7B71846BEAE7F18D0C91885F5D54463C",
+		},
+		{
+			name:              "flood advert mutiple paths",
+			hex:               "1102ED26E5549C5F2D5BED2FACF65F266BB6DFE0A6B37D6A00998D4A168AC0926F58878BC90FC2698CEB3F58AFB8175EF52335BE6F26C991BE54A9CC3DC73EFD98AA79E04165A8E41DF0B5DC6317C1097DB38CE5BB5A7D33613862B5697B55246C296CC942DE6500922CEDABFD1DD3600A48656C74656320536D61727420526F616420F09F93A1",
+			wantRouteType:     RouteTypeFlood,
+			wantRouteString:   "FLOOD",
+			wantPayloadType:   PayloadTypeAdvert,
+			wantPayloadString: "ADVERT",
+			wantPayloadVer:    0,
+			wantPathHashSize:  1,
+			wantPathHashCount: 2,
+			wantPath:          "ED26",
+			wantPathHashes:    []string{"ED", "26"},
+			wantPayload:       "E5549C5F2D5BED2FACF65F266BB6DFE0A6B37D6A00998D4A168AC0926F58878BC90FC2698CEB3F58AFB8175EF52335BE6F26C991BE54A9CC3DC73EFD98AA79E04165A8E41DF0B5DC6317C1097DB38CE5BB5A7D33613862B5697B55246C296CC942DE6500922CEDABFD1DD3600A48656C74656320536D61727420526F616420F09F93A1",
+		},
+		{
+			name:              "flood direct message 3 paths",
+			hex:               "09039E2AB4E7FC33569A0CBD06C11F1D83694A8EBF0347F015",
+			wantRouteType:     RouteTypeFlood,
+			wantRouteString:   "FLOOD",
+			wantPayloadType:   PayloadTypeTxtMsg,
+			wantPayloadString: "TXT_MSG",
+			wantPathHashSize:  1,
+			wantPathHashCount: 3,
+			wantPath:          "9E2AB4",
+			wantPathHashes:    []string{"9E", "2A", "B4"},
+			wantPayload:       "E7FC33569A0CBD06C11F1D83694A8EBF0347F015",
+		},
+		{
+			name:              "path request",
+			hex:               "2200D0911ABF2B592C0ED36DAD11706FCE9BF9A8F5A0",
+			wantRouteType:     RouteTypeDirect,
+			wantRouteString:   "DIRECT",
+			wantPayloadType:   PayloadTypePath,
+			wantPayloadString: "PATH",
+			wantPathHashSize:  1,
+			wantPathHashCount: 0,
+			wantPathHashes:    nil,
+			wantPayload:       "D0911ABF2B592C0ED36DAD11706FCE9BF9A8F5A0",
+		},
+		{
+			name:              "response flood 12 paths",
+			hex:               "050C9344CF7F3587B4E02030E0B4BEC86D404C5088B01C80923931092DA28C3AC36B",
+			wantRouteType:     RouteTypeFlood,
+			wantRouteString:   "FLOOD",
+			wantPayloadType:   PayloadTypeResponse,
+			wantPayloadString: "RESPONSE",
+			wantPathHashSize:  1,
+			wantPathHashCount: 12,
+			wantPath:          "9344CF7F3587B4E02030E0B4",
+			wantPathHashes:    []string{"93", "44", "CF", "7F", "35", "87", "B4", "E0", "20", "30", "E0", "B4"},
+			wantPayload:       "BEC86D404C5088B01C80923931092DA28C3AC36B",
+		},
+		{
+			name:              "group text flood",
+			hex:               "15011A592D0286C326FECAD3BCC5FCED344D35058B86CDEE316B9519476632CB0C1DA876B0B9",
+			wantRouteType:     RouteTypeFlood,
+			wantRouteString:   "FLOOD",
+			wantPayloadType:   PayloadTypeGrpTxt,
+			wantPayloadString: "GRP_TXT",
+			wantPathHashSize:  1,
+			wantPathHashCount: 1,
+			wantPath:          "1A",
+			wantPathHashes:    []string{"1A"},
+			wantPayload:       "592D0286C326FECAD3BCC5FCED344D35058B86CDEE316B9519476632CB0C1DA876B0B9",
+		},
+		{
+			name:              "control packet",
+			hex:               "2E00922022A647361AE0CD045686121EB405484D99A9126D8C5962D6344AA78C71A8D0EDF153A900",
+			wantRouteType:     RouteTypeDirect,
+			wantRouteString:   "DIRECT",
+			wantPayloadType:   PayloadTypeControl,
+			wantPayloadString: "CONTROL",
+			wantPathHashSize:  1,
+			wantPayload:       "922022A647361AE0CD045686121EB405484D99A9126D8C5962D6344AA78C71A8D0EDF153A900",
+		},
+		{
+			name:    "empty input returns error",
+			hex:     "",
+			wantErr: true,
+		},
+		{
+			name:    "transport flood header only missing transport codes",
+			hex:     "00",
+			wantErr: true,
+		},
+		{
+			name:    "transport flood partial transport code",
+			hex:     "001234",
+			wantErr: true,
+		},
+		{
+			name:    "direct header only missing path length",
+			hex:     "02",
+			wantErr: true,
+		},
+		{
+			name:    "reserved path mode 3",
+			hex:     "01C1",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := hex.DecodeString(tt.hex)
+			if err != nil {
+				t.Fatalf("bad test hex: %v", err)
+			}
+
+			pkt, err := PacketFromBytes(data)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := pkt.RouteType(); got != tt.wantRouteType {
+				t.Errorf("RouteType() = 0x%02x, want 0x%02x", got, tt.wantRouteType)
+			}
+			if got := pkt.RouteTypeString(); got != tt.wantRouteString {
+				t.Errorf("RouteTypeString() = %q, want %q", got, tt.wantRouteString)
+			}
+			if got := pkt.PayloadType(); got != tt.wantPayloadType {
+				t.Errorf("PayloadType() = 0x%02x, want 0x%02x", got, tt.wantPayloadType)
+			}
+			if got := pkt.PayloadTypeString(); got != tt.wantPayloadString {
+				t.Errorf("PayloadTypeString() = %q, want %q", got, tt.wantPayloadString)
+			}
+			if got := pkt.PayloadVer(); got != tt.wantPayloadVer {
+				t.Errorf("PayloadVer() = 0x%02x, want 0x%02x", got, tt.wantPayloadVer)
+			}
+			if pkt.TransportCode1 != tt.wantTC1 {
+				t.Errorf("TransportCode1 = 0x%04x, want 0x%04x", pkt.TransportCode1, tt.wantTC1)
+			}
+			if pkt.TransportCode2 != tt.wantTC2 {
+				t.Errorf("TransportCode2 = 0x%04x, want 0x%04x", pkt.TransportCode2, tt.wantTC2)
+			}
+
+			wantPath, _ := hex.DecodeString(tt.wantPath)
+			if got := hex.EncodeToString(pkt.Path); got != hex.EncodeToString(wantPath) {
+				t.Errorf("Path = %s, want %s", got, tt.wantPath)
+			}
+
+			if got := pkt.PathHashSize(); got != tt.wantPathHashSize {
+				t.Errorf("PathHashSize() = %d, want %d", got, tt.wantPathHashSize)
+			}
+			if got := pkt.PathHashCount(); got != tt.wantPathHashCount {
+				t.Errorf("PathHashCount() = %d, want %d", got, tt.wantPathHashCount)
+			}
+
+			gotHashes := pkt.PathHashes()
+			if len(gotHashes) != len(tt.wantPathHashes) {
+				t.Errorf("PathHashes() len = %d, want %d", len(gotHashes), len(tt.wantPathHashes))
+			} else {
+				for i, wantHex := range tt.wantPathHashes {
+					got := hex.EncodeToString(gotHashes[i])
+					if !strings.EqualFold(got, wantHex) {
+						t.Errorf("PathHashes()[%d] = %s, want %s", i, got, wantHex)
+					}
+				}
+			}
+
+			wantPayload, _ := hex.DecodeString(tt.wantPayload)
+			if got := hex.EncodeToString(pkt.Payload); got != hex.EncodeToString(wantPayload) {
+				t.Errorf("Payload = %s, want %s", got, tt.wantPayload)
+			}
+		})
+	}
+}
+
+func TestPacketToBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		pkt     Packet
+		wantHex string
+	}{
+		{
+			name: "direct anon_req with 3 path hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeDirect, PayloadTypeAnonReq, 0),
+				PathLength: 0x03,
+				Path:       hexBytes(t, "FB028B"),
+				Payload:    hexBytes(t, "B7403537145668C6B670B74DF85583B557173E03EEE24C2642145B17272946D3CF048D7B71846BEAE7F18D0C91885F5D54463C"),
+			},
+			wantHex: "1E03FB028BB7403537145668C6B670B74DF85583B557173E03EEE24C2642145B17272946D3CF048D7B71846BEAE7F18D0C91885F5D54463C",
+		},
+		{
+			name: "flood advert with 2 path hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeAdvert, 0),
+				PathLength: 0x02,
+				Path:       hexBytes(t, "ED26"),
+				Payload:    hexBytes(t, "E5549C5F2D5BED2FACF65F266BB6DFE0A6B37D6A00998D4A168AC0926F58878BC90FC2698CEB3F58AFB8175EF52335BE6F26C991BE54A9CC3DC73EFD98AA79E04165A8E41DF0B5DC6317C1097DB38CE5BB5A7D33613862B5697B55246C296CC942DE6500922CEDABFD1DD3600A48656C74656320536D61727420526F616420F09F93A1"),
+			},
+			wantHex: "1102ED26E5549C5F2D5BED2FACF65F266BB6DFE0A6B37D6A00998D4A168AC0926F58878BC90FC2698CEB3F58AFB8175EF52335BE6F26C991BE54A9CC3DC73EFD98AA79E04165A8E41DF0B5DC6317C1097DB38CE5BB5A7D33613862B5697B55246C296CC942DE6500922CEDABFD1DD3600A48656C74656320536D61727420526F616420F09F93A1",
+		},
+		{
+			name: "flood text message with 3 path hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeTxtMsg, 0),
+				PathLength: 0x03,
+				Path:       hexBytes(t, "9E2AB4"),
+				Payload:    hexBytes(t, "E7FC33569A0CBD06C11F1D83694A8EBF0347F015"),
+			},
+			wantHex: "09039E2AB4E7FC33569A0CBD06C11F1D83694A8EBF0347F015",
+		},
+		{
+			name: "direct path with no hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeDirect, PayloadTypePath, 0),
+				PathLength: 0x00,
+				Path:       []byte{},
+				Payload:    hexBytes(t, "D0911ABF2B592C0ED36DAD11706FCE9BF9A8F5A0"),
+			},
+			wantHex: "2200D0911ABF2B592C0ED36DAD11706FCE9BF9A8F5A0",
+		},
+		{
+			name: "flood response with 12 path hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeResponse, 0),
+				PathLength: 0x0C,
+				Path:       hexBytes(t, "9344CF7F3587B4E02030E0B4"),
+				Payload:    hexBytes(t, "BEC86D404C5088B01C80923931092DA28C3AC36B"),
+			},
+			wantHex: "050C9344CF7F3587B4E02030E0B4BEC86D404C5088B01C80923931092DA28C3AC36B",
+		},
+		{
+			name: "flood group text with 1 path hash",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeGrpTxt, 0),
+				PathLength: 0x01,
+				Path:       hexBytes(t, "1A"),
+				Payload:    hexBytes(t, "592D0286C326FECAD3BCC5FCED344D35058B86CDEE316B9519476632CB0C1DA876B0B9"),
+			},
+			wantHex: "15011A592D0286C326FECAD3BCC5FCED344D35058B86CDEE316B9519476632CB0C1DA876B0B9",
+		},
+		{
+			name: "direct control with no hashes",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeDirect, PayloadTypeControl, 0),
+				PathLength: 0x00,
+				Path:       []byte{},
+				Payload:    hexBytes(t, "922022A647361AE0CD045686121EB405484D99A9126D8C5962D6344AA78C71A8D0EDF153A900"),
+			},
+			wantHex: "2E00922022A647361AE0CD045686121EB405484D99A9126D8C5962D6344AA78C71A8D0EDF153A900",
+		},
+		{
+			name: "transport direct with transport codes",
+			pkt: Packet{
+				Header:         MakeHeader(RouteTypeTransportDirect, PayloadTypeTrace, 2),
+				TransportCode1: 0x1234,
+				TransportCode2: 0xABCD,
+				PathLength:     0x43,
+				Path:           []byte{0xAA, 0x01, 0xBB, 0x02, 0xCC, 0x03},
+				Payload:        []byte{0x10, 0x20, 0x30, 0x40},
+			},
+			wantHex: "A73412CDAB43AA01BB02CC0310203040",
+		},
+		{
+			name: "transport flood with transport codes",
+			pkt: Packet{
+				Header:         MakeHeader(RouteTypeTransportFlood, PayloadTypeAck, 1),
+				TransportCode1: 0x0BAD,
+				TransportCode2: 0xF00D,
+				PathLength:     0x02,
+				Path:           []byte{0xAA, 0xBB},
+				Payload:        []byte{0x99, 0x88, 0x77},
+			},
+			wantHex: "4CAD0B0DF002AABB998877",
+		},
+		{
+			name: "flood with empty path and payload",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeReq, 0),
+				PathLength: 0x00,
+				Path:       []byte{},
+				Payload:    []byte{},
+			},
+			wantHex: "0100",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.pkt.ToBytes()
+			if err != nil {
+				t.Fatalf("unexpected encode error: %v", err)
+			}
+			if gotHex := hex.EncodeToString(got); !strings.EqualFold(gotHex, tt.wantHex) {
+				t.Errorf("ToBytes() = %s, want %s", gotHex, tt.wantHex)
+			}
+		})
+	}
+}
+
+func hexBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad hex %q: %v", s, err)
+	}
+	return b
+}
+
+func TestMakeHeader(t *testing.T) {
+	tests := []struct {
+		name        string
+		routeType   byte
+		payloadType byte
+		payloadVer  byte
+		wantHeader  byte
+	}{
+		{"flood/req/v0", RouteTypeFlood, PayloadTypeReq, 0, 0x01},
+		{"direct/txtmsg/v0", RouteTypeDirect, PayloadTypeTxtMsg, 0, 0x0A},
+		{"flood/advert/v0", RouteTypeFlood, PayloadTypeAdvert, 0, 0x11},
+		{"direct/path/v0", RouteTypeDirect, PayloadTypePath, 0, 0x22},
+		{"direct/control/v0", RouteTypeDirect, PayloadTypeControl, 0, 0x2E},
+		{"transport_flood/ack/v0", RouteTypeTransportFlood, PayloadTypeAck, 0, 0x0C},
+		{"transport_direct/trace/v2", RouteTypeTransportDirect, PayloadTypeTrace, 2, 0xA7},
+		{"flood/grp_txt/v0", RouteTypeFlood, PayloadTypeGrpTxt, 0, 0x15},
+		{"flood/grp_data/v1", RouteTypeFlood, PayloadTypeGrpData, 1, 0x59},
+		{"direct/anon_req/v0", RouteTypeDirect, PayloadTypeAnonReq, 0, 0x1E},
+		{"flood/response/v0", RouteTypeFlood, PayloadTypeResponse, 0, 0x05},
+		{"flood/multi_part/v0", RouteTypeFlood, PayloadTypeMultiPart, 0, 0x29},
+		{"direct/raw_custom/v3", RouteTypeDirect, PayloadTypeRawCustom, 3, 0xFE},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MakeHeader(tt.routeType, tt.payloadType, tt.payloadVer)
+			if got != tt.wantHeader {
+				t.Errorf("MakeHeader(0x%02x, 0x%02x, %d) = 0x%02x, want 0x%02x",
+					tt.routeType, tt.payloadType, tt.payloadVer, got, tt.wantHeader)
+			}
+
+			pkt := &Packet{Header: got}
+			if pkt.RouteType() != tt.routeType {
+				t.Errorf("RouteType() = 0x%02x, want 0x%02x", pkt.RouteType(), tt.routeType)
+			}
+			if pkt.PayloadType() != tt.payloadType {
+				t.Errorf("PayloadType() = 0x%02x, want 0x%02x", pkt.PayloadType(), tt.payloadType)
+			}
+			if pkt.PayloadVer() != tt.payloadVer {
+				t.Errorf("PayloadVer() = %d, want %d", pkt.PayloadVer(), tt.payloadVer)
+			}
+		})
+	}
+}
+
+func TestRouteTypeString(t *testing.T) {
+	tests := []struct {
+		routeType byte
+		want      string
+	}{
+		{RouteTypeTransportFlood, "TRANSPORT_FLOOD"},
+		{RouteTypeFlood, "FLOOD"},
+		{RouteTypeDirect, "DIRECT"},
+		{RouteTypeTransportDirect, "TRANSPORT_DIRECT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			pkt := &Packet{Header: tt.routeType}
+			if got := pkt.RouteTypeString(); got != tt.want {
+				t.Errorf("RouteTypeString() = %q, want %q (routeType=0x%02x)", got, tt.want, tt.routeType)
+			}
+		})
+	}
+}
+
+func TestRouteTypeStringExhaustiveMaskedValues(t *testing.T) {
+	tests := []struct {
+		header byte
+		want   string
+	}{
+		{0x00, "TRANSPORT_FLOOD"},
+		{0x01, "FLOOD"},
+		{0x02, "DIRECT"},
+		{0x03, "TRANSPORT_DIRECT"},
+		{0xFF, "TRANSPORT_DIRECT"},
+		{0xFC, "TRANSPORT_FLOOD"},
+	}
+
+	for _, tt := range tests {
+		t.Run(hex.EncodeToString([]byte{tt.header}), func(t *testing.T) {
+			pkt := &Packet{Header: tt.header}
+			if got := pkt.RouteTypeString(); got != tt.want {
+				t.Errorf("RouteTypeString() = %q, want %q (header=0x%02x)", got, tt.want, tt.header)
+			}
+		})
+	}
+}
+
+func TestPayloadTypeString(t *testing.T) {
+	tests := []struct {
+		payloadType byte
+		want        string
+	}{
+		{PayloadTypeReq, "REQ"},
+		{PayloadTypeResponse, "RESPONSE"},
+		{PayloadTypeTxtMsg, "TXT_MSG"},
+		{PayloadTypeAck, "ACK"},
+		{PayloadTypeAdvert, "ADVERT"},
+		{PayloadTypeGrpTxt, "GRP_TXT"},
+		{PayloadTypeGrpData, "GRP_DATA"},
+		{PayloadTypeAnonReq, "ANON_REQ"},
+		{PayloadTypePath, "PATH"},
+		{PayloadTypeTrace, "TRACE"},
+		{PayloadTypeMultiPart, "MULTI_PART"},
+		{PayloadTypeControl, "CONTROL"},
+		{PayloadTypeRawCustom, "RAW_CUSTOM"},
+		{0x0D, ""},
+		{0x0E, ""},
+	}
+
+	for _, tt := range tests {
+		name := tt.want
+		if name == "" {
+			name = "unknown"
+		}
+		t.Run(name, func(t *testing.T) {
+			header := MakeHeader(0, tt.payloadType, 0)
+			pkt := &Packet{Header: header}
+			if got := pkt.PayloadTypeString(); got != tt.want {
+				t.Errorf("PayloadTypeString() = %q, want %q (payloadType=0x%02x)", got, tt.want, tt.payloadType)
+			}
+		})
+	}
+}
+
+func TestIsValidPathLen(t *testing.T) {
+	tests := []struct {
+		name      string
+		pathLen   uint8
+		wantValid bool
+	}{
+		{"zero", 0x00, true},
+		{"1 hash size=1", 0x01, true},
+		{"3 hashes size=1", 0x03, true},
+		{"63 hashes size=1 (max for size=1)", 0x3F, true},
+		{"1 hash size=2", 0x41, true},
+		{"32 hashes size=2 (exactly 64)", 0x60, true},
+		{"33 hashes size=2 (66 > 64)", 0x61, false},
+		{"1 hash size=3", 0x81, true},
+		{"21 hashes size=3 (63 <= 64)", 0x95, true},
+		{"22 hashes size=3 (66 > 64)", 0x96, false},
+		{"reserved mode 3 zero count", 0xC0, false},
+		{"reserved mode 3 with count", 0xC1, false},
+		{"reserved mode 3 max count", 0xFF, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsValidPathLen(tt.pathLen); got != tt.wantValid {
+				t.Errorf("IsValidPathLen(0x%02x) = %v, want %v", tt.pathLen, got, tt.wantValid)
+			}
+		})
+	}
+}
+
+func TestPacketFromBytesOversizedPayload(t *testing.T) {
+	data := make([]byte, 2+MaxPacketPayload+1)
+	data[0] = MakeHeader(RouteTypeFlood, PayloadTypeReq, 0)
+	data[1] = 0x00
+
+	_, err := PacketFromBytes(data)
+	if err == nil {
+		t.Fatal("expected error for oversized payload, got nil")
+	}
+}
+
+func TestPacketFromBytesTruncatedPath(t *testing.T) {
+	data := []byte{
+		MakeHeader(RouteTypeFlood, PayloadTypeReq, 0),
+		0x05,
+	}
+	_, err := PacketFromBytes(data)
+	if err == nil {
+		t.Fatal("expected error for truncated path data, got nil")
+	}
+}
+
+func TestPacketValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		pkt     Packet
+		wantErr bool
+	}{
+		{
+			name: "valid flood packet",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeFlood, PayloadTypeTxtMsg, 0),
+				PathLength: 0x03,
+				Path:       []byte{0x01, 0x02, 0x03},
+				Payload:    make([]byte, 20),
+			},
+		},
+		{
+			name: "valid with max payload",
+			pkt: Packet{
+				Header:     MakeHeader(RouteTypeDirect, PayloadTypeReq, 0),
+				PathLength: 0x00,
+				Payload:    make([]byte, MaxPacketPayload),
+			},
+		},
+		{
+			name: "invalid reserved path mode",
+			pkt: Packet{
+				PathLength: 0xC1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "oversized payload",
+			pkt: Packet{
+				PathLength: 0x00,
+				Payload:    make([]byte, MaxPacketPayload+1),
+			},
+			wantErr: true,
+		},
+		{
+			name: "path bytes exceed max",
+			pkt: Packet{
+				PathLength: 0x61,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.pkt.Validate()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
