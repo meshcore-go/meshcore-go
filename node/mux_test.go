@@ -21,6 +21,7 @@ func (m *mockModem) SendData(data []byte) error {
 }
 
 func (m *mockModem) SetDataHandler(h func([]byte, int8, int8)) { m.dataH = h }
+func (m *mockModem) AddOutboundHandler(h func([]byte))         {}
 
 func (m *mockModem) inject(data []byte) {
 	if m.dataH != nil {
@@ -330,5 +331,65 @@ func TestMux_MultipleAttachAndDetach(t *testing.T) {
 	}
 	if c3 != 1 {
 		t.Errorf("r3: got %d, want 1", c3)
+	}
+}
+
+func TestMux_OutboundHandlerCalledOnSend(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	radio := mux.NewRadio()
+
+	var captured []byte
+	radio.AddOutboundHandler(func(data []byte) {
+		captured = append([]byte{}, data...)
+	})
+
+	payload := []byte{0xCA, 0xFE}
+	if err := radio.SendData(payload); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if len(captured) != 2 || captured[0] != 0xCA || captured[1] != 0xFE {
+		t.Errorf("outbound handler got %X, want CAFE", captured)
+	}
+}
+
+func TestMux_MultipleOutboundHandlers(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	radio := mux.NewRadio()
+
+	var count int
+	radio.AddOutboundHandler(func([]byte) { count++ })
+	radio.AddOutboundHandler(func([]byte) { count++ })
+
+	if err := radio.SendData([]byte{0x01}); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if count != 2 {
+		t.Errorf("expected 2 handler calls, got %d", count)
+	}
+}
+
+func TestMux_OutboundHandlerPerRadio(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	radioA := mux.NewRadio()
+	radioB := mux.NewRadio()
+
+	var countA, countB int
+	radioA.AddOutboundHandler(func([]byte) { countA++ })
+	radioB.AddOutboundHandler(func([]byte) { countB++ })
+
+	if err := radioA.SendData([]byte{0x01}); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if countA != 1 {
+		t.Errorf("radioA handler: got %d, want 1", countA)
+	}
+	if countB != 0 {
+		t.Errorf("radioB handler: got %d, want 0", countB)
 	}
 }

@@ -26,6 +26,9 @@ type CompanionModem struct {
 
 	mu    sync.Mutex
 	dataH func(data []byte, snr int8, rssi int8)
+
+	outboundMu sync.RWMutex
+	outboundH  []func([]byte)
 }
 
 // NewCompanionModem creates a CompanionModem backed by the given Client.
@@ -43,8 +46,20 @@ func NewCompanionModem(ctx context.Context, c *Client) *CompanionModem {
 	return m
 }
 
+func (m *CompanionModem) AddOutboundHandler(h func([]byte)) {
+	m.outboundMu.Lock()
+	m.outboundH = append(m.outboundH, h)
+	m.outboundMu.Unlock()
+}
+
 // SendData transmits raw packet bytes through the companion device.
 func (m *CompanionModem) SendData(data []byte) error {
+	m.outboundMu.RLock()
+	handlers := m.outboundH
+	m.outboundMu.RUnlock()
+	for _, h := range handlers {
+		h(data)
+	}
 	return m.client.SendRawData(m.ctx, nil, data)
 }
 

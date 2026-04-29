@@ -92,11 +92,11 @@ func WithAdvertInterval(d time.Duration) Option {
 }
 
 // WithChannels pre-populates channels starting at index 0.
-// Entries beyond MaxChannels are silently ignored.
+// Entries beyond the configured max channels are silently ignored.
 func WithChannels(chs ...*meshcore.ChannelEntry) Option {
 	return func(n *Node) {
 		for i, ch := range chs {
-			if i >= MaxChannels {
+			if i >= n.channels.maxChannels() {
 				break
 			}
 			n.channels.channels[i] = ch
@@ -136,12 +136,19 @@ func WithMaxTxQueue(max int) Option {
 	}
 }
 
+func WithMaxChannels(max int) Option {
+	return func(n *Node) {
+		n.channels = newChannelTable(max)
+	}
+}
+
 func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	n := &Node{
 		identity:        identity,
 		radio:           radio,
 		peers:           NewPeerTable(DefaultMaxPeers),
 		secrets:         newSecretCache(identity),
+		channels:        newChannelTable(DefaultMaxChannels),
 		regions:         NewRegionMap(),
 		airtimeFactor:   DefaultAirtimeFactor,
 		dutyCycleWindow: DefaultDutyCycleWindow,

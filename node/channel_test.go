@@ -13,7 +13,7 @@ func testChannel(name string) *meshcore.ChannelEntry {
 }
 
 func TestChannelTable_SetAndGet(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ch := testChannel("test")
 
 	if !ct.set(0, ch) {
@@ -26,29 +26,29 @@ func TestChannelTable_SetAndGet(t *testing.T) {
 }
 
 func TestChannelTable_SetOutOfRange(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ch := testChannel("test")
 
 	if ct.set(-1, ch) {
 		t.Error("set(-1) should return false")
 	}
-	if ct.set(MaxChannels, ch) {
-		t.Errorf("set(%d) should return false", MaxChannels)
+	if ct.set(DefaultMaxChannels, ch) {
+		t.Errorf("set(%d) should return false", DefaultMaxChannels)
 	}
 }
 
 func TestChannelTable_GetOutOfRange(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	if ct.get(-1) != nil {
 		t.Error("get(-1) should return nil")
 	}
-	if ct.get(MaxChannels) != nil {
-		t.Errorf("get(%d) should return nil", MaxChannels)
+	if ct.get(DefaultMaxChannels) != nil {
+		t.Errorf("get(%d) should return nil", DefaultMaxChannels)
 	}
 }
 
 func TestChannelTable_Remove(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ch := testChannel("test")
 	ct.set(3, ch)
 
@@ -61,24 +61,24 @@ func TestChannelTable_Remove(t *testing.T) {
 }
 
 func TestChannelTable_RemoveEmpty(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	if ct.remove(0) {
 		t.Error("remove(0) should return false for empty slot")
 	}
 }
 
 func TestChannelTable_RemoveOutOfRange(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	if ct.remove(-1) {
 		t.Error("remove(-1) should return false")
 	}
-	if ct.remove(MaxChannels) {
-		t.Errorf("remove(%d) should return false", MaxChannels)
+	if ct.remove(DefaultMaxChannels) {
+		t.Errorf("remove(%d) should return false", DefaultMaxChannels)
 	}
 }
 
 func TestChannelTable_FindByHash(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ch := testChannel("findme")
 	ct.set(2, ch)
 
@@ -89,7 +89,7 @@ func TestChannelTable_FindByHash(t *testing.T) {
 }
 
 func TestChannelTable_FindByHashMiss(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ct.set(0, testChannel("one"))
 
 	got := ct.findByHash(0xFF)
@@ -99,7 +99,7 @@ func TestChannelTable_FindByHashMiss(t *testing.T) {
 }
 
 func TestChannelTable_FindByHashReturnsAll(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 
 	// Two channels collide on the 1-byte hash.
 	ch1 := testChannel("alpha")
@@ -119,7 +119,7 @@ func TestChannelTable_FindByHashReturnsAll(t *testing.T) {
 }
 
 func TestChannelTable_All(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ct.set(0, testChannel("a"))
 	ct.set(3, testChannel("b"))
 	ct.set(7, testChannel("c"))
@@ -131,7 +131,7 @@ func TestChannelTable_All(t *testing.T) {
 }
 
 func TestChannelTable_AllEmpty(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	all := ct.all()
 	if len(all) != 0 {
 		t.Errorf("all() returned %d entries, want 0", len(all))
@@ -139,7 +139,7 @@ func TestChannelTable_AllEmpty(t *testing.T) {
 }
 
 func TestChannelTable_Overwrite(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ch1 := testChannel("first")
 	ch2 := testChannel("second")
 	ct.set(0, ch1)
@@ -151,7 +151,7 @@ func TestChannelTable_Overwrite(t *testing.T) {
 }
 
 func TestChannelTable_SetNilClears(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	ct.set(0, testChannel("x"))
 	ct.set(0, nil)
 
@@ -165,10 +165,10 @@ func TestChannelTable_SetNilClears(t *testing.T) {
 }
 
 func TestChannelTable_Concurrent(t *testing.T) {
-	var ct channelTable
+	ct := newChannelTable(DefaultMaxChannels)
 	var wg sync.WaitGroup
 
-	for i := range MaxChannels {
+	for i := range DefaultMaxChannels {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -268,7 +268,7 @@ func TestNode_WithChannels(t *testing.T) {
 
 func TestNode_WithChannelsOverflow(t *testing.T) {
 	radio := &mockRadio{}
-	chs := make([]*meshcore.ChannelEntry, MaxChannels+3)
+	chs := make([]*meshcore.ChannelEntry, DefaultMaxChannels+3)
 	for i := range chs {
 		chs[i] = testChannel("overflow")
 	}
@@ -276,8 +276,8 @@ func TestNode_WithChannelsOverflow(t *testing.T) {
 	defer n.Stop()
 
 	all := n.Channels()
-	if len(all) != MaxChannels {
-		t.Errorf("Channels() = %d, want %d (extras should be ignored)", len(all), MaxChannels)
+	if len(all) != DefaultMaxChannels {
+		t.Errorf("Channels() = %d, want %d (extras should be ignored)", len(all), DefaultMaxChannels)
 	}
 }
 

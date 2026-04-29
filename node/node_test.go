@@ -24,6 +24,7 @@ func (m *mockRadio) SendData(data []byte) error {
 
 func (m *mockRadio) SetDataHandler(h func(*meshcore.Packet))      { m.dataH = h }
 func (m *mockRadio) SetRawDataHandler(h func([]byte, int8, int8)) { m.rawDataH = h }
+func (m *mockRadio) AddOutboundHandler(h func([]byte))            {}
 func (m *mockRadio) Close() error                                 { return nil }
 
 func (m *mockRadio) inject(data []byte) {

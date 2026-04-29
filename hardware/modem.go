@@ -60,6 +60,9 @@ type KissModem struct {
 	pendingMu    sync.Mutex
 	pendingFrame *KissFrame
 	pendingTimer *time.Timer
+
+	outboundMu sync.RWMutex
+	outboundH  []func([]byte)
 }
 
 // NewKissModem creates a new KissModem using the given transport.
@@ -130,8 +133,20 @@ func (m *KissModem) OnHwResponse(subCmd byte, h HwFrameHandler) {
 	m.hwMu.Unlock()
 }
 
+func (m *KissModem) AddOutboundHandler(h func([]byte)) {
+	m.outboundMu.Lock()
+	m.outboundH = append(m.outboundH, h)
+	m.outboundMu.Unlock()
+}
+
 // SendData sends a data frame.
 func (m *KissModem) SendData(data []byte) error {
+	m.outboundMu.RLock()
+	handlers := m.outboundH
+	m.outboundMu.RUnlock()
+	for _, h := range handlers {
+		h(data)
+	}
 	frame := EncodeFrame(m.kissPort, KISS_CMD_DATA, data)
 	return m.transport.Send(frame)
 }

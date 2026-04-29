@@ -12,15 +12,26 @@ var (
 	ErrInvalidPayload    = errors.New("invalid payload for packet type")
 )
 
-const MaxChannels = 50
+// DefaultMaxChannels is the default upper bound on channel slots.
+const DefaultMaxChannels = 50
 
 type channelTable struct {
 	mu       sync.RWMutex
-	channels [MaxChannels]*meshcore.ChannelEntry
+	channels []*meshcore.ChannelEntry
+}
+
+func newChannelTable(maxChannels int) channelTable {
+	return channelTable{
+		channels: make([]*meshcore.ChannelEntry, maxChannels),
+	}
+}
+
+func (ct *channelTable) maxChannels() int {
+	return len(ct.channels)
 }
 
 func (ct *channelTable) set(idx int, ch *meshcore.ChannelEntry) bool {
-	if idx < 0 || idx >= MaxChannels {
+	if idx < 0 || idx >= ct.maxChannels() {
 		return false
 	}
 	ct.mu.Lock()
@@ -30,7 +41,7 @@ func (ct *channelTable) set(idx int, ch *meshcore.ChannelEntry) bool {
 }
 
 func (ct *channelTable) remove(idx int) bool {
-	if idx < 0 || idx >= MaxChannels {
+	if idx < 0 || idx >= ct.maxChannels() {
 		return false
 	}
 	ct.mu.Lock()
@@ -41,7 +52,7 @@ func (ct *channelTable) remove(idx int) bool {
 }
 
 func (ct *channelTable) get(idx int) *meshcore.ChannelEntry {
-	if idx < 0 || idx >= MaxChannels {
+	if idx < 0 || idx >= ct.maxChannels() {
 		return nil
 	}
 	ct.mu.RLock()
