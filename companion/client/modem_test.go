@@ -149,3 +149,31 @@ func TestCompanionModem_SendError(t *testing.T) {
 }
 
 var errMock = errors.New("mock send error")
+
+func TestCompanionModem_OutboundHandlerCalledBeforeSend(t *testing.T) {
+	mt := &mockTransport{}
+	mt.onSend = func(cmd []byte) {
+		go mt.fireResponse(companion.Response{
+			Code: companion.RespOk,
+			Data: companion.OkResponse{},
+		})
+	}
+
+	c := New(mt)
+	m := NewCompanionModem(context.Background(), c)
+	defer m.Close()
+
+	var captured []byte
+	m.AddOutboundHandler(func(data []byte) {
+		captured = append([]byte{}, data...)
+	})
+
+	payload := []byte{0xDE, 0xAD}
+	if err := m.SendData(payload); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if len(captured) != 2 || captured[0] != 0xDE || captured[1] != 0xAD {
+		t.Errorf("outbound handler got %X, want DEAD", captured)
+	}
+}

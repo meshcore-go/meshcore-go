@@ -3,78 +3,81 @@ package transport
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/meshcore-go/meshcore-go/companion"
 	"go.bug.st/serial"
 )
 
 type SerialConfig struct {
 	Port     string
 	BaudRate int
+	BaseConfig
+}
+
+type serialConn struct {
+	serial.Port
+}
+
+func (c *serialConn) Close() error {
+	return c.Port.Close()
 }
 
 type SerialTransport struct {
-	config     SerialConfig
-	port       serial.Port
-	parser     *companion.FrameParser
-	onResponse ResponseHandler
-	onError    ErrorHandler
-	done       chan struct{}
-	closeOnce  sync.Once
+	*baseTransport
 }
 
 func NewSerialTransport(config SerialConfig) *SerialTransport {
+	dial := func(_ context.Context) (Conn, error) {
+		port, err := serial.Open(config.Port, &serial.Mode{BaudRate: config.BaudRate})
+		if err != nil {
+			return nil, fmt.Errorf("open serial port: %w", err)
+		}
+
+		if err := port.SetReadTimeout(100 * time.Millisecond); err != nil {
+			_ = port.Close()
+			return nil, fmt.Errorf("set read timeout: %w", err)
+		}
+
+		return &serialConn{port}, nil
+	}
+
 	return &SerialTransport{
-		config: config,
-		parser: companion.NewFrameParser(),
-		done:   make(chan struct{}),
+		baseTransport: newBaseTransport(dial, config.BaseConfig),
 	}
 }
 
-func (t *SerialTransport) Connect(_ context.Context) error {
-	port, err := serial.Open(t.config.Port, &serial.Mode{BaudRate: t.config.BaudRate})
-	if err != nil {
-		return fmt.Errorf("open serial port: %w", err)
-	}
-
-	if err := port.SetReadTimeout(100 * time.Millisecond); err != nil {
-		_ = port.Close()
-		return fmt.Errorf("set read timeout: %w", err)
-	}
-
-	t.port = port
-	go readLoop(t.port, t.done, t.parser, t.onResponse, t.onError)
-
-	return nil
+func (t *SerialTransport) Connect(ctx context.Context) error {
+	return t.baseTransport.connect(ctx)
 }
 
 func (t *SerialTransport) Close() error {
-	var closeErr error
-
-	t.closeOnce.Do(func() {
-		close(t.done)
-		if t.port != nil {
-			closeErr = t.port.Close()
-		}
-	})
-
-	return closeErr
+	return t.baseTransport.close()
 }
 
 func (t *SerialTransport) Send(command []byte) error {
-	if t.port == nil {
-		return fmt.Errorf("serial transport not connected")
-	}
-
-	return writeCommand(t.port, command)
+	return t.baseTransport.send(command)
 }
 
 func (t *SerialTransport) SetResponseHandler(h ResponseHandler) {
+	t.mu.Lock()
 	t.onResponse = h
+	t.mu.Unlock()
 }
 
 func (t *SerialTransport) SetErrorHandler(h ErrorHandler) {
+	t.mu.Lock()
 	t.onError = h
+	t.mu.Unlock()
+}
+
+func (t *SerialTransport) SetDisconnectHandler(h func()) {
+	t.mu.Lock()
+	t.onDisconnect = h
+	t.mu.Unlock()
+}
+
+func (t *SerialTransport) SetReconnectHandler(h func()) {
+	t.mu.Lock()
+	t.onReconnect = h
+	t.mu.Unlock()
 }

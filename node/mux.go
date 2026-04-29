@@ -9,6 +9,7 @@ import (
 type Modem interface {
 	SendData(data []byte) error
 	SetDataHandler(func(data []byte, snr int8, rssi int8))
+	AddOutboundHandler(h func([]byte))
 }
 
 // PacketFilter decides whether a virtual radio wants to handle a packet.
@@ -21,15 +22,28 @@ type MuxRadio interface {
 }
 
 type virtualRadio struct {
-	mux      *RadioMux
-	filter   PacketFilter
-	dataH    func(*meshcore.Packet)
-	rawDataH func([]byte, int8, int8)
-	mu       sync.RWMutex
+	mux       *RadioMux
+	filter    PacketFilter
+	dataH     func(*meshcore.Packet)
+	rawDataH  func([]byte, int8, int8)
+	outboundH []func([]byte)
+	mu        sync.RWMutex
 }
 
 func (v *virtualRadio) SendData(data []byte) error {
+	v.mu.RLock()
+	handlers := v.outboundH
+	v.mu.RUnlock()
+	for _, h := range handlers {
+		h(data)
+	}
 	return v.mux.modem.SendData(data)
+}
+
+func (v *virtualRadio) AddOutboundHandler(h func([]byte)) {
+	v.mu.Lock()
+	v.outboundH = append(v.outboundH, h)
+	v.mu.Unlock()
 }
 
 func (v *virtualRadio) SetDataHandler(h func(*meshcore.Packet)) {

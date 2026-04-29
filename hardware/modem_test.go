@@ -533,3 +533,44 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 		t.Errorf("frame 2: expected SNR=10 RSSI=-40, got %d/%d", received[2].SNR, received[2].RSSI)
 	}
 }
+
+func TestKissModem_OutboundHandlerCalledBeforeSend(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt)
+
+	var captured []byte
+	m.AddOutboundHandler(func(data []byte) {
+		captured = append([]byte{}, data...)
+	})
+
+	payload := []byte{0xDE, 0xAD}
+	if err := m.SendData(payload); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if len(captured) != 2 || captured[0] != 0xDE || captured[1] != 0xAD {
+		t.Errorf("outbound handler got %X, want DEAD", captured)
+	}
+
+	sent := mt.sentFrames()
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 sent frame, got %d", len(sent))
+	}
+}
+
+func TestKissModem_MultipleOutboundHandlers(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt)
+
+	var count int
+	m.AddOutboundHandler(func([]byte) { count++ })
+	m.AddOutboundHandler(func([]byte) { count++ })
+
+	if err := m.SendData([]byte{0x01}); err != nil {
+		t.Fatalf("SendData error: %v", err)
+	}
+
+	if count != 2 {
+		t.Errorf("expected 2 handler calls, got %d", count)
+	}
+}
