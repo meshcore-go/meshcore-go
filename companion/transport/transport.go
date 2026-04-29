@@ -38,6 +38,9 @@ type BaseConfig struct {
 
 	// TxQueueSize is the max pending commands while disconnected. Default: 64. Oldest dropped when full.
 	TxQueueSize int
+
+	// InboundBufferSize is the capacity of the inbound response channel. Default: 64.
+	InboundBufferSize int
 }
 
 type baseTransport struct {
@@ -50,6 +53,10 @@ type baseTransport struct {
 	onError      ErrorHandler
 	onDisconnect func()
 	onReconnect  func()
+
+	inbound chan companion.Response
+	flush   chan chan struct{}
+	drainWg sync.WaitGroup
 
 	mu        sync.Mutex
 	connected bool
@@ -68,14 +75,22 @@ func newBaseTransport(dial DialFunc, config BaseConfig) *baseTransport {
 	if config.TxQueueSize <= 0 {
 		config.TxQueueSize = 64
 	}
+	if config.InboundBufferSize <= 0 {
+		config.InboundBufferSize = 64
+	}
 
-	return &baseTransport{
+	bt := &baseTransport{
 		dial:    dial,
 		config:  config,
 		parser:  companion.NewFrameParser(),
 		txQueue: make(chan []byte, config.TxQueueSize),
 		done:    make(chan struct{}),
+		inbound: make(chan companion.Response, config.InboundBufferSize),
+		flush:   make(chan chan struct{}),
 	}
+	bt.drainWg.Add(1)
+	go bt.drainInbound()
+	return bt
 }
 
 func (t *baseTransport) connect(ctx context.Context) error {
@@ -95,6 +110,63 @@ func (t *baseTransport) connect(ctx context.Context) error {
 	return nil
 }
 
+func (t *baseTransport) drainInbound() {
+	defer t.drainWg.Done()
+	for {
+		select {
+		case resp, ok := <-t.inbound:
+			if !ok {
+				return
+			}
+			t.mu.Lock()
+			h := t.onResponse
+			t.mu.Unlock()
+			if h != nil {
+				h(resp)
+			}
+		case done := <-t.flush:
+			// Drain any remaining buffered responses before signalling.
+			for {
+				select {
+				case resp, ok := <-t.inbound:
+					if !ok {
+						close(done)
+						return
+					}
+					t.mu.Lock()
+					h := t.onResponse
+					t.mu.Unlock()
+					if h != nil {
+						h(resp)
+					}
+				default:
+					close(done)
+					goto cont
+				}
+			}
+		cont:
+		}
+	}
+}
+
+func (t *baseTransport) enqueueResponse(resp companion.Response) {
+	select {
+	case t.inbound <- resp:
+	case <-t.done:
+	}
+}
+
+// Flush blocks until all currently enqueued responses have been dispatched.
+// Intended for testing.
+func (t *baseTransport) Flush() {
+	done := make(chan struct{})
+	select {
+	case t.flush <- done:
+		<-done
+	case <-t.done:
+	}
+}
+
 func (t *baseTransport) close() error {
 	var closeErr error
 
@@ -107,6 +179,9 @@ func (t *baseTransport) close() error {
 			closeErr = t.conn.Close()
 		}
 		t.mu.Unlock()
+
+		close(t.inbound)
+		t.drainWg.Wait()
 	})
 
 	return closeErr
@@ -177,11 +252,10 @@ func (t *baseTransport) readLoopWithReconnect() {
 	for {
 		t.mu.Lock()
 		conn := t.conn
-		responseFn := t.onResponse
 		errorFn := t.onError
 		t.mu.Unlock()
 
-		readLoop(conn, t.done, t.parser, responseFn, errorFn)
+		readLoop(conn, t.done, t.parser, t.enqueueResponse, errorFn)
 
 		select {
 		case <-t.done:

@@ -82,6 +82,7 @@ func TestModem_SignalReportDisabled_ImmediateDispatch(t *testing.T) {
 
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
+	modem.Flush()
 
 	if len(received) != 2 {
 		t.Fatalf("expected 2 frames, got %d", len(received))
@@ -102,12 +103,14 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 
 	// Inject a data frame — should be queued, not dispatched.
 	mt.injectFrame(makeDataFrame([]byte{0xAA}))
+	modem.Flush()
 	if len(received) != 0 {
 		t.Fatalf("data frame should be queued, got %d dispatched", len(received))
 	}
 
 	// Inject RX_META — should enrich and dispatch the queued frame.
 	mt.injectFrame(makeRxMetaFrame(-6, -80))
+	modem.Flush()
 	if len(received) != 1 {
 		t.Fatalf("expected 1 dispatched frame after meta, got %d", len(received))
 	}
@@ -139,6 +142,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 
 	// Inject second data frame — first should flush with zero SNR/RSSI.
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
+	modem.Flush()
 
 	mu.Lock()
 	count := len(received)
@@ -159,6 +163,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 
 	// Now deliver meta for the second frame.
 	mt.injectFrame(makeRxMetaFrame(5, -50))
+	modem.Flush()
 
 	mu.Lock()
 	count = len(received)
@@ -260,6 +265,7 @@ func TestModem_SignalReportEnabled_NonDataNonMetaImmediate(t *testing.T) {
 		Data:    []byte{HW_RESP_TX_DONE, 0x01},
 	}
 	mt.injectFrame(hwFrame)
+	modem.Flush()
 
 	if len(received) != 1 {
 		t.Fatalf("expected 1 immediate frame, got %d", len(received))
@@ -356,6 +362,7 @@ func TestModem_DataHandler(t *testing.T) {
 	})
 
 	mt.injectFrame(makeDataFrame([]byte{0xDE, 0xAD}))
+	modem.Flush()
 
 	if len(dataReceived) != 1 {
 		t.Fatalf("expected 1 data callback, got %d", len(dataReceived))
@@ -381,6 +388,7 @@ func TestModem_HwResponseHandler(t *testing.T) {
 		Data:    []byte{HwResp(HW_CMD_PING), 0x01},
 	}
 	mt.injectFrame(pingResp)
+	modem.Flush()
 
 	if len(hwCalls) != 1 {
 		t.Fatalf("expected 1 hw callback, got %d", len(hwCalls))
@@ -402,6 +410,7 @@ func TestModem_SignalReportEnabled_RxMetaAlsoFiresHwHandler(t *testing.T) {
 	// Queue a data frame, then deliver meta.
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeRxMetaFrame(-3, -70))
+	modem.Flush()
 
 	if hwCalls != 1 {
 		t.Errorf("expected RX_META hw handler called once, got %d", hwCalls)
@@ -428,6 +437,7 @@ func TestModem_SignalReportEnabled_MetaShortPayload(t *testing.T) {
 		Data:    []byte{HW_RESP_RX_META}, // only sub-command, no SNR/RSSI
 	}
 	mt.injectFrame(shortMeta)
+	modem.Flush()
 
 	// The pending frame should be dispatched (without enrichment).
 	dataFrames := 0
@@ -489,6 +499,7 @@ func TestModem_ErrorHandler(t *testing.T) {
 		Data:    []byte{},
 	}
 	mt.injectFrame(bad)
+	modem.Flush()
 
 	if errReceived == nil {
 		t.Error("expected error for malformed HW frame")
@@ -514,6 +525,7 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	mt.injectFrame(makeDataFrame([]byte{0x03}))
 	mt.injectFrame(makeRxMetaFrame(10, -40))
+	modem.Flush()
 
 	mu.Lock()
 	defer mu.Unlock()
