@@ -23,36 +23,15 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Update submodule dependencies
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s|github.com/meshcore-go/meshcore-go v.*|github.com/meshcore-go/meshcore-go ${VERSION}|" \
-            companion/transport/go.mod \
-            hardware/transport/go.mod
-
-      - name: Commit dependency updates
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add companion/transport/go.mod hardware/transport/go.mod
-          git commit -m "release: update submodule dependencies to ${{ steps.version.outputs.version }}"
-
-      - name: Move root tag to updated commit
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git tag -f "${VERSION}"
-
       - name: Create submodule tags
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git tag "companion/transport/${VERSION}"
           git tag "hardware/transport/${VERSION}"
 
-      - name: Push commit and tags
+      - name: Push submodule tags
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git push origin HEAD:main
-          git push origin -f "${VERSION}"
           git push origin "companion/transport/${VERSION}"
           git push origin "hardware/transport/${VERSION}"
 

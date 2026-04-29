@@ -9,6 +9,9 @@ import (
 
 const rxMetaTimeout = 1 * time.Second
 
+// DefaultInboundBuffer is the default capacity of the inbound frame channel.
+const DefaultInboundBuffer = 64
+
 // Transport is the interface that hardware transports must implement.
 type Transport interface {
 	Connect(ctx context.Context) error
@@ -39,11 +42,25 @@ func WithSignalReport(enabled bool) ModemOption {
 	}
 }
 
+// WithInboundBuffer sets the capacity of the inbound frame channel.
+// Defaults to DefaultInboundBuffer (64).
+func WithInboundBuffer(size int) ModemOption {
+	return func(m *KissModem) {
+		m.inboundSize = size
+	}
+}
+
 // KissModem represents a KISS TNC modem connection.
 type KissModem struct {
 	transport    Transport
 	kissPort     int
 	signalReport bool
+	inboundSize  int
+
+	inbound chan *KissFrame
+	flush   chan chan struct{}
+	done    chan struct{}
+	drainWg sync.WaitGroup
 
 	errMu sync.RWMutex
 	errH  func(error)
@@ -68,15 +85,50 @@ type KissModem struct {
 // NewKissModem creates a new KissModem using the given transport.
 func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	m := &KissModem{
-		transport: t,
-		hwMap:     make(map[byte][]HwFrameHandler),
+		transport:   t,
+		inboundSize: DefaultInboundBuffer,
+		hwMap:       make(map[byte][]HwFrameHandler),
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.inbound = make(chan *KissFrame, m.inboundSize)
+	m.flush = make(chan chan struct{})
+	m.done = make(chan struct{})
+	m.drainWg.Add(1)
+	go m.drainInbound()
 	t.SetFrameHandler(m.onFrame)
 	t.SetErrorHandler(m.onError)
 	return m
+}
+
+func (m *KissModem) drainInbound() {
+	defer m.drainWg.Done()
+	for {
+		select {
+		case frame, ok := <-m.inbound:
+			if !ok {
+				return
+			}
+			m.dispatchFrame(frame)
+		case done := <-m.flush:
+			// Drain any remaining buffered frames before signalling.
+			for {
+				select {
+				case frame, ok := <-m.inbound:
+					if !ok {
+						close(done)
+						return
+					}
+					m.dispatchFrame(frame)
+				default:
+					close(done)
+					goto cont
+				}
+			}
+		cont:
+		}
+	}
 }
 
 // Connect opens the transport connection. If signal reporting is enabled,
@@ -102,6 +154,9 @@ func (m *KissModem) Close() error {
 	}
 	m.pendingFrame = nil
 	m.pendingMu.Unlock()
+	close(m.done)
+	close(m.inbound)
+	m.drainWg.Wait()
 	return m.transport.Close()
 }
 
@@ -241,7 +296,7 @@ func (m *KissModem) onFrame(frame *KissFrame) {
 		m.onFrameWithSignalReport(frame)
 		return
 	}
-	m.dispatchFrame(frame)
+	m.enqueueFrame(frame)
 }
 
 func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
@@ -261,9 +316,9 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 		if pending != nil && len(frame.Data) >= 3 {
 			pending.SNR = int8(frame.Data[1])
 			pending.RSSI = int8(frame.Data[2])
-			m.dispatchFrame(pending)
+			m.enqueueFrame(pending)
 		} else if pending != nil {
-			m.dispatchFrame(pending)
+			m.enqueueFrame(pending)
 		}
 
 		// Still dispatch the HW frame to registered hw handlers.
@@ -290,13 +345,13 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 
 		// Flush the stale frame that never got its metadata.
 		if stale != nil {
-			m.dispatchFrame(stale)
+			m.enqueueFrame(stale)
 		}
 		return
 	}
 
 	// All other frames (non-data, non-RX_META) dispatch immediately.
-	m.dispatchFrame(frame)
+	m.enqueueFrame(frame)
 }
 
 // flushPending dispatches the pending data frame without metadata (timeout).
@@ -310,7 +365,25 @@ func (m *KissModem) flushPending() {
 	m.pendingMu.Unlock()
 
 	if pending != nil {
-		m.dispatchFrame(pending)
+		m.enqueueFrame(pending)
+	}
+}
+
+func (m *KissModem) enqueueFrame(frame *KissFrame) {
+	select {
+	case m.inbound <- frame:
+	case <-m.done:
+	}
+}
+
+// Flush blocks until all currently enqueued frames have been dispatched.
+// Intended for testing.
+func (m *KissModem) Flush() {
+	done := make(chan struct{})
+	select {
+	case m.flush <- done:
+		<-done
+	case <-m.done:
 	}
 }
 
