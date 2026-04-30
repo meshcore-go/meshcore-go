@@ -12,7 +12,7 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 	}
 
 	if pkt.PayloadType() == meshcore.PayloadTypeTrace {
-		if !n.router.dedup.hasSeen(pkt) {
+		if !n.router.dedup.HasSeen(pkt) {
 			n.dispatchPacket(pkt)
 		}
 		return
@@ -37,6 +37,8 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 func (n *Node) handleAdvert(pkt *meshcore.Packet) {
 	adv, err := meshcore.AdvertFromBytes(pkt.Payload)
 	if err != nil {
+		n.log.Debug("failed to parse advert", "error", err)
+		n.dispatchError(err)
 		return
 	}
 

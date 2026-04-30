@@ -264,7 +264,7 @@ func (p *Packet) PacketHash() [PacketHashSize]byte {
 	h := sha256.New()
 	h.Write([]byte{p.PayloadType()})
 	if p.PayloadType() == PayloadTypeTrace {
-		h.Write([]byte{p.PathLength})
+		h.Write([]byte{p.PathLength, 0}) // uint16 LE to match C++ sizeof(uint16_t)
 	}
 	h.Write(p.Payload)
 	sum := h.Sum(nil)

@@ -257,10 +257,12 @@ func DecodeFrame(raw []byte) (*KissFrame, error) {
 }
 
 // ExtractFrames extracts all complete KISS frames from a byte stream.
-// It returns the decoded frames and any remaining bytes that don't form a
-// complete frame (useful for streaming/buffered reads).
-func ExtractFrames(stream []byte) ([]*KissFrame, []byte) {
+// It returns the decoded frames, any remaining bytes that don't form a
+// complete frame (useful for streaming/buffered reads), and any decode
+// errors encountered for malformed frames that were skipped.
+func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 	var frames []*KissFrame
+	var errs []error
 
 	// Skip any bytes before the first FEND
 	start := -1
@@ -271,7 +273,7 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte) {
 		}
 	}
 	if start == -1 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	i := start
@@ -293,6 +295,8 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte) {
 				frame, err := DecodeFrame(frameData)
 				if err == nil {
 					frames = append(frames, frame)
+				} else {
+					errs = append(errs, err)
 				}
 				i = j + 1
 				found = true
@@ -301,9 +305,9 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte) {
 		}
 		if !found {
 			// Incomplete frame — return remainder
-			return frames, stream[frameStart:]
+			return frames, stream[frameStart:], errs
 		}
 	}
 
-	return frames, nil
+	return frames, nil, errs
 }

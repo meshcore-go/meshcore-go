@@ -35,8 +35,14 @@ func readLoop(conn io.Reader, done <-chan struct{}, onFrame FrameHandler, onErro
 
 		if n > 0 {
 			data := append(remainder, buf[:n]...)
-			frames, rem := hardware.ExtractFrames(data)
+			frames, rem, decodeErrs := hardware.ExtractFrames(data)
 			remainder = rem
+
+			for _, err := range decodeErrs {
+				if onError != nil {
+					onError(err)
+				}
+			}
 
 			for _, frame := range frames {
 				if onFrame != nil {

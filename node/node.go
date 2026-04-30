@@ -2,6 +2,7 @@ package node
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type Node struct {
 	channels   channelTable
 	regions    *RegionMap
 	scheduler  *txScheduler
+	log        *slog.Logger
 
 	airtimeFactor    float64
 	dutyCycleWindow  time.Duration
@@ -58,6 +60,12 @@ type Option func(*Node)
 func WithErrorHandler(h func(error)) Option {
 	return func(n *Node) {
 		n.errH = h
+	}
+}
+
+func WithLogger(l *slog.Logger) Option {
+	return func(n *Node) {
+		n.log = l
 	}
 }
 
@@ -160,6 +168,9 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	n.router.node = n
 	for _, opt := range opts {
 		opt(n)
+	}
+	if n.log == nil {
+		n.log = slog.Default()
 	}
 
 	sendFn := func(data []byte) error {
@@ -317,7 +328,7 @@ func (n *Node) OnPacket(payloadType byte, h PacketHandler) {
 }
 
 func (n *Node) SendPacket(pkt *meshcore.Packet) error {
-	n.router.dedup.markSeen(pkt)
+	n.router.dedup.MarkSeen(pkt)
 	data, err := pkt.ToBytes()
 	if err != nil {
 		return err
