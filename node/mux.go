@@ -1,6 +1,8 @@
 package node
 
 import (
+	"encoding/hex"
+	"log/slog"
 	"sync"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
@@ -97,12 +99,34 @@ func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr int8, rssi 
 // via its PacketFilter.
 type RadioMux struct {
 	modem  Modem
+	log    *slog.Logger
+	errH   func(error)
 	mu     sync.RWMutex
 	radios []*virtualRadio
 }
 
-func NewRadioMux(modem Modem) *RadioMux {
+type MuxOption func(*RadioMux)
+
+func WithMuxLogger(l *slog.Logger) MuxOption {
+	return func(m *RadioMux) {
+		m.log = l
+	}
+}
+
+func WithMuxErrorHandler(h func(error)) MuxOption {
+	return func(m *RadioMux) {
+		m.errH = h
+	}
+}
+
+func NewRadioMux(modem Modem, opts ...MuxOption) *RadioMux {
 	m := &RadioMux{modem: modem}
+	for _, opt := range opts {
+		opt(m)
+	}
+	if m.log == nil {
+		m.log = slog.Default()
+	}
 	modem.SetDataHandler(m.onData)
 	return m
 }
@@ -131,6 +155,10 @@ func (m *RadioMux) remove(v *virtualRadio) {
 func (m *RadioMux) onData(data []byte, snr int8, rssi int8) {
 	pkt, err := meshcore.PacketFromBytes(data)
 	if err != nil {
+		m.log.Debug("failed to parse packet", "error", err, "data_len", len(data), "hex", hex.EncodeToString(data))
+		if m.errH != nil {
+			m.errH(err)
+		}
 		return
 	}
 	pkt.SNR = snr

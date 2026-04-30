@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type BaseConfig struct {
 
 	// InboundBufferSize is the capacity of the inbound response channel. Default: 64.
 	InboundBufferSize int
+
+	// Logger is the structured logger. Defaults to slog.Default().
+	Logger *slog.Logger
 }
 
 type baseTransport struct {
@@ -48,6 +52,7 @@ type baseTransport struct {
 	config BaseConfig
 	parser *companion.FrameParser
 	conn   Conn
+	log    *slog.Logger
 
 	onResponse   ResponseHandler
 	onError      ErrorHandler
@@ -87,6 +92,10 @@ func newBaseTransport(dial DialFunc, config BaseConfig) *baseTransport {
 		done:    make(chan struct{}),
 		inbound: make(chan companion.Response, config.InboundBufferSize),
 		flush:   make(chan chan struct{}),
+		log:     config.Logger,
+	}
+	if bt.log == nil {
+		bt.log = slog.Default()
 	}
 	bt.drainWg.Add(1)
 	go bt.drainInbound()
@@ -255,7 +264,7 @@ func (t *baseTransport) readLoopWithReconnect() {
 		errorFn := t.onError
 		t.mu.Unlock()
 
-		readLoop(conn, t.done, t.parser, t.enqueueResponse, errorFn)
+		readLoop(conn, t.done, t.parser, t.enqueueResponse, errorFn, t.log)
 
 		select {
 		case <-t.done:
@@ -325,7 +334,7 @@ func (t *baseTransport) reconnect() bool {
 	}
 }
 
-func readLoop(conn io.Reader, done <-chan struct{}, parser *companion.FrameParser, onResponse ResponseHandler, onError ErrorHandler) {
+func readLoop(conn io.Reader, done <-chan struct{}, parser *companion.FrameParser, onResponse ResponseHandler, onError ErrorHandler, log *slog.Logger) {
 	buf := make([]byte, 256)
 
 	for {
@@ -342,6 +351,7 @@ func readLoop(conn io.Reader, done <-chan struct{}, parser *companion.FrameParse
 			for _, frame := range frames {
 				resp, parseErr := companion.ParseResponse(frame.Data)
 				if parseErr != nil {
+					log.Debug("failed to parse response", "error", parseErr)
 					if onError != nil {
 						onError(parseErr)
 					}

@@ -3,6 +3,7 @@ package hardware
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -50,12 +51,21 @@ func WithInboundBuffer(size int) ModemOption {
 	}
 }
 
+// WithLogger sets the structured logger for the modem.
+// Defaults to slog.Default() if not provided.
+func WithLogger(l *slog.Logger) ModemOption {
+	return func(m *KissModem) {
+		m.log = l
+	}
+}
+
 // KissModem represents a KISS TNC modem connection.
 type KissModem struct {
 	transport    Transport
 	kissPort     int
 	signalReport bool
 	inboundSize  int
+	log          *slog.Logger
 
 	inbound chan *KissFrame
 	flush   chan chan struct{}
@@ -91,6 +101,9 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.log == nil {
+		m.log = slog.Default()
 	}
 	m.inbound = make(chan *KissFrame, m.inboundSize)
 	m.flush = make(chan chan struct{})
@@ -411,6 +424,7 @@ func (m *KissModem) dispatchFrame(frame *KissFrame) {
 func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 	subCmd, data, err := DecodeHardwareFrame(frame)
 	if err != nil {
+		m.log.Debug("failed to decode hardware frame", "error", err)
 		m.dispatchError(fmt.Errorf("kiss: decode hw frame: %w", err))
 		return
 	}
@@ -423,6 +437,7 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 }
 
 func (m *KissModem) onError(err error) {
+	m.log.Debug("transport error", "error", err)
 	m.dispatchError(err)
 }
 

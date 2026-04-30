@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -185,7 +186,7 @@ func TestReadLoopReadError(t *testing.T) {
 		defer close(finished)
 		readLoop(mock, done, companion.NewFrameParser(), nil, func(err error) {
 			errorsCh <- err
-		})
+		}, slog.Default())
 	}()
 
 	err := mustRecvError(t, errorsCh)
@@ -205,7 +206,7 @@ func TestReadLoopDoneSignal(t *testing.T) {
 		defer close(finished)
 		readLoop(mock, done, companion.NewFrameParser(), nil, func(err error) {
 			errorsCh <- err
-		})
+		}, slog.Default())
 	}()
 
 	close(done)
@@ -222,7 +223,7 @@ func startReadLoop(mock io.Reader, done <-chan struct{}, responses chan companio
 			responses <- resp
 		}, func(err error) {
 			errorsCh <- err
-		})
+		}, slog.Default())
 	}()
 	return finished
 }

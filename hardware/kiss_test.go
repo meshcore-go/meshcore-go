@@ -359,7 +359,7 @@ func TestExtractFrames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			frames, remainder := ExtractFrames(tc.stream)
+			frames, remainder, _ := ExtractFrames(tc.stream)
 			if len(frames) != tc.frameCount {
 				t.Errorf("frame count = %d, want %d", len(frames), tc.frameCount)
 			}

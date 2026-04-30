@@ -14,7 +14,7 @@ const (
 )
 
 type router struct {
-	dedup dedupCache
+	dedup meshcore.DedupCache
 	node  *Node
 
 	send       func([]byte) error
@@ -33,7 +33,7 @@ func (r *router) route(pkt *meshcore.Packet) RouteAction {
 		return r.routeFlood(pkt)
 	}
 
-	if r.dedup.hasSeen(pkt) {
+	if r.dedup.HasSeen(pkt) {
 		return RouteActionDrop
 	}
 	return RouteActionDeliver
@@ -47,7 +47,7 @@ func (r *router) routeDirect(pkt *meshcore.Packet) RouteAction {
 
 	if !r.node.getIdentity().IsHashMatch(hashes[0]) {
 		if r.node != nil && r.node.canAcceptPacket(pkt) {
-			if r.dedup.hasSeen(pkt) {
+			if r.dedup.HasSeen(pkt) {
 				return RouteActionDrop
 			}
 			return RouteActionDeliver
@@ -55,7 +55,7 @@ func (r *router) routeDirect(pkt *meshcore.Packet) RouteAction {
 		return RouteActionDrop
 	}
 
-	if r.dedup.hasSeen(pkt) {
+	if r.dedup.HasSeen(pkt) {
 		return RouteActionDrop
 	}
 
@@ -69,7 +69,7 @@ func (r *router) routeDirect(pkt *meshcore.Packet) RouteAction {
 }
 
 func (r *router) routeFlood(pkt *meshcore.Packet) RouteAction {
-	if r.dedup.hasSeen(pkt) {
+	if r.dedup.HasSeen(pkt) {
 		return RouteActionDrop
 	}
 
