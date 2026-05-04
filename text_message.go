@@ -1,6 +1,10 @@
 package meshcore
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+	"time"
+)
 
 type TextMessage struct {
 	Destination      byte
@@ -85,4 +89,29 @@ func (t *TextMessage) Decrypt(sharedSecret []byte) []byte {
 
 	result, _ := MACThenDecrypt(sharedSecret, src)
 	return result
+}
+
+func BuildTextPlaintext(timestamp time.Time, flags byte, text []byte) []byte {
+	buf := make([]byte, 4+1+len(text))
+	binary.LittleEndian.PutUint32(buf[:4], uint32(timestamp.Unix()))
+	buf[4] = flags
+	copy(buf[5:], text)
+	return buf
+}
+
+func NewTextMessage(self LocalIdentity, peer Identity, plaintext []byte, sharedSecret []byte) (*TextMessage, error) {
+	encrypted, err := EncryptThenMAC(sharedSecret, plaintext)
+	if err != nil {
+		return nil, err
+	}
+
+	var mac [2]byte
+	copy(mac[:], encrypted[:cipherMACSize])
+
+	return &TextMessage{
+		Destination:      peer.PublicKey()[0],
+		Source:           self.PublicKey()[0],
+		MAC:              mac,
+		EncryptedPayload: encrypted[cipherMACSize:],
+	}, nil
 }

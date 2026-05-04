@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"sync"
+	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
@@ -19,7 +20,7 @@ type PacketFilter func(pkt *meshcore.Packet) bool
 
 // MuxRadio extends Radio with packet filtering for use with RadioMux.
 type MuxRadio interface {
-	Radio
+	TxRadio
 	SetPacketFilter(f PacketFilter)
 }
 
@@ -33,13 +34,24 @@ type virtualRadio struct {
 }
 
 func (v *virtualRadio) SendData(data []byte) error {
+	if !v.Enqueue(data, PrioritySend, 0) {
+		return ErrTxQueueFull
+	}
+	return nil
+}
+
+func (v *virtualRadio) Enqueue(data []byte, priority uint8, delay time.Duration) bool {
 	v.mu.RLock()
 	handlers := v.outboundH
 	v.mu.RUnlock()
 	for _, h := range handlers {
 		h(data)
 	}
-	return v.mux.modem.SendData(data)
+	return v.mux.enqueue(data, priority, delay)
+}
+
+func (v *virtualRadio) TxQueueLen() int {
+	return v.mux.txQueueLen()
 }
 
 func (v *virtualRadio) AddOutboundHandler(h func([]byte)) {
@@ -96,13 +108,18 @@ func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr int8, rssi 
 
 // RadioMux shares a single Modem across multiple virtual radios.
 // Incoming packets are delivered to each virtual radio that accepts them
-// via its PacketFilter.
+// via its PacketFilter. Outgoing packets are serialized through a shared
+// transmit queue to prevent concurrent writes to the modem.
 type RadioMux struct {
 	modem  Modem
 	log    *slog.Logger
 	errH   func(error)
 	mu     sync.RWMutex
 	radios []*virtualRadio
+
+	txMu  sync.Mutex
+	queue *txQueue
+	done  chan struct{}
 }
 
 type MuxOption func(*RadioMux)
@@ -119,8 +136,18 @@ func WithMuxErrorHandler(h func(error)) MuxOption {
 	}
 }
 
+func WithMuxMaxTxQueue(max int) MuxOption {
+	return func(m *RadioMux) {
+		m.queue = newTxQueue(max)
+	}
+}
+
 func NewRadioMux(modem Modem, opts ...MuxOption) *RadioMux {
-	m := &RadioMux{modem: modem}
+	m := &RadioMux{
+		modem: modem,
+		queue: newTxQueue(DefaultMaxTxQueue),
+		done:  make(chan struct{}),
+	}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -128,7 +155,50 @@ func NewRadioMux(modem Modem, opts ...MuxOption) *RadioMux {
 		m.log = slog.Default()
 	}
 	modem.SetDataHandler(m.onData)
+	go m.txLoop()
 	return m
+}
+
+func (m *RadioMux) enqueue(data []byte, priority uint8, delay time.Duration) bool {
+	m.txMu.Lock()
+	ok := m.queue.add(data, priority, time.Now().Add(delay))
+	m.txMu.Unlock()
+	return ok
+}
+
+func (m *RadioMux) txQueueLen() int {
+	m.txMu.Lock()
+	defer m.txMu.Unlock()
+	return m.queue.len()
+}
+
+func (m *RadioMux) txLoop() {
+	ticker := time.NewTicker(queuedRadioTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			m.drainQueue()
+		}
+	}
+}
+
+func (m *RadioMux) drainQueue() {
+	for {
+		m.txMu.Lock()
+		entry := m.queue.pop(time.Now())
+		m.txMu.Unlock()
+		if entry == nil {
+			return
+		}
+		_ = m.modem.SendData(entry.data)
+	}
+}
+
+func (m *RadioMux) Stop() {
+	close(m.done)
 }
 
 func (m *RadioMux) NewRadio() MuxRadio {
@@ -196,5 +266,4 @@ func clonePacket(pkt *meshcore.Packet) (*meshcore.Packet, error) {
 	return clone, nil
 }
 
-// compile-time check: *virtualRadio implements Radio
 var _ MuxRadio = (*virtualRadio)(nil)

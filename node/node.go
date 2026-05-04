@@ -30,6 +30,7 @@ type Node struct {
 	peers      *PeerTable
 	secrets    *secretCache
 	acks       *ackTracker
+	retries    *retryTracker
 	channels   channelTable
 	regions    *RegionMap
 	scheduler  *txScheduler
@@ -173,12 +174,21 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 		n.log = slog.Default()
 	}
 
-	sendFn := func(data []byte) error {
-		return radio.SendData(data)
+	// Ensure the radio supports queued transmission. If not, wrap it.
+	txRadio, ok := radio.(TxRadio)
+	if !ok {
+		txRadio = NewQueuedRadio(radio, n.maxTxQueue, n.done)
+		n.radio = txRadio
 	}
 
 	if n.airtimeEstimator != nil {
 		budget := newAirtimeBudget(n.airtimeFactor, n.dutyCycleWindow, n.airtimeEstimator)
+		sendFn := func(data []byte, priority uint8) error {
+			if !txRadio.Enqueue(data, priority, 0) {
+				return ErrTxQueueFull
+			}
+			return nil
+		}
 		n.scheduler = newTxScheduler(budget, n.maxTxQueue, sendFn, n.done)
 		n.scheduler.setErrorHandler(func(err error) {
 			n.dispatchError(err)
@@ -198,10 +208,13 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 			return nil
 		}
 	} else {
-		n.router.send = sendFn
+		n.router.send = func(data []byte) error {
+			return txRadio.SendData(data)
+		}
 	}
 
 	n.acks = newACKTracker(n.done)
+	n.retries = newRetryTracker(n.sendPacketRaw, n.done)
 	radio.SetDataHandler(n.onData)
 
 	if n.advertData != nil {
@@ -329,6 +342,10 @@ func (n *Node) OnPacket(payloadType byte, h PacketHandler) {
 
 func (n *Node) SendPacket(pkt *meshcore.Packet) error {
 	n.router.dedup.MarkSeen(pkt)
+	return n.sendPacketRaw(pkt)
+}
+
+func (n *Node) sendPacketRaw(pkt *meshcore.Packet) error {
 	data, err := pkt.ToBytes()
 	if err != nil {
 		return err
@@ -342,11 +359,179 @@ func (n *Node) SendPacket(pkt *meshcore.Packet) error {
 	return n.radio.SendData(data)
 }
 
-func (n *Node) TxQueueLen() int {
-	if n.scheduler == nil {
-		return 0
+type GroupSendResult struct {
+	Confirmed bool
+}
+
+type DMSendResult struct {
+	Confirmed bool
+	RoundTrip time.Duration
+}
+
+func (n *Node) SendGroupText(
+	ch *meshcore.ChannelEntry,
+	payload *meshcore.GroupTextPayload,
+	pathHashSize uint8,
+	retryTimeout time.Duration,
+	maxRetries int,
+	onResult func(GroupSendResult),
+) error {
+	grp, err := payload.Encrypt(ch.Hash, ch.PSK[:])
+	if err != nil {
+		return err
 	}
-	return n.scheduler.queueLen()
+	grpBytes, err := grp.ToBytes()
+	if err != nil {
+		return err
+	}
+
+	pkt := &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0),
+		PathLength: (pathHashSize - 1) << 6,
+		Path:       []byte{},
+		Payload:    grpBytes,
+	}
+
+	if err := n.sendPacketRaw(pkt); err != nil {
+		return err
+	}
+
+	n.retries.track(pkt, maxRetries, retryTimeout,
+		func() {
+			if onResult != nil {
+				onResult(GroupSendResult{Confirmed: true})
+			}
+		},
+		func() {
+			if onResult != nil {
+				onResult(GroupSendResult{Confirmed: false})
+			}
+		},
+	)
+
+	return nil
+}
+
+func (n *Node) SendTextMessage(
+	peer meshcore.Identity,
+	text []byte,
+	flags byte,
+	timestamp time.Time,
+	path []byte,
+	pathHashSize uint8,
+	timeout time.Duration,
+	onResult func(DMSendResult),
+) error {
+	self := n.getIdentity()
+	secret, err := n.secrets.get(peer)
+	if err != nil {
+		return err
+	}
+
+	plaintext := meshcore.BuildTextPlaintext(timestamp, flags, text)
+	ackCRC := meshcore.CalcAckHash(plaintext, self.PublicKeyBytes())
+
+	msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
+	if err != nil {
+		return err
+	}
+	msgBytes, err := msg.ToBytes()
+	if err != nil {
+		return err
+	}
+
+	isDirect := len(path) > 0
+	var routeType byte
+	if isDirect {
+		routeType = meshcore.RouteTypeDirect
+	} else {
+		routeType = meshcore.RouteTypeFlood
+	}
+
+	pkt := &meshcore.Packet{
+		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeTxtMsg, 0),
+		PathLength: (pathHashSize - 1) << 6,
+		Path:       path,
+		Payload:    msgBytes,
+	}
+	if isDirect {
+		pkt.PathLength |= uint8(len(path) / int(pathHashSize))
+	}
+
+	if err := n.sendPacketRaw(pkt); err != nil {
+		return err
+	}
+	n.router.dedup.MarkSeen(pkt)
+
+	var maxRetries int
+	var directRetries int
+	if isDirect {
+		maxRetries = 5
+		directRetries = 3
+	} else {
+		maxRetries = 3
+		directRetries = 0
+	}
+
+	attempt := 1
+	var registerACK func()
+	registerACK = func() {
+		n.acks.expect(ackCRC, timeout,
+			func(rt time.Duration) {
+				if onResult != nil {
+					onResult(DMSendResult{Confirmed: true, RoundTrip: rt})
+				}
+			},
+			func() {
+				attempt++
+				if attempt > maxRetries {
+					if onResult != nil {
+						onResult(DMSendResult{Confirmed: false})
+					}
+					return
+				}
+
+				retryPkt := n.buildRetryPacket(pkt, attempt, directRetries, pathHashSize)
+				if err := n.sendPacketRaw(retryPkt); err != nil {
+					if onResult != nil {
+						onResult(DMSendResult{Confirmed: false})
+					}
+					return
+				}
+				registerACK()
+			},
+		)
+	}
+	registerACK()
+
+	return nil
+}
+
+func (n *Node) buildRetryPacket(original *meshcore.Packet, attempt, directRetries int, pathHashSize uint8) *meshcore.Packet {
+	if attempt <= directRetries {
+		return &meshcore.Packet{
+			Header:     original.Header,
+			PathLength: original.PathLength,
+			Path:       original.Path,
+			Payload:    original.Payload,
+		}
+	}
+	return &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeTxtMsg, 0),
+		PathLength: (pathHashSize - 1) << 6,
+		Path:       []byte{},
+		Payload:    original.Payload,
+	}
+}
+
+func (n *Node) TxQueueLen() int {
+	if n.scheduler != nil {
+		return n.scheduler.queueLen()
+	}
+	if txr, ok := n.radio.(TxRadio); ok {
+		return txr.TxQueueLen()
+	}
+	return 0
 }
 
 func (n *Node) Stop() {

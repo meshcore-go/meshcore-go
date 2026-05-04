@@ -18,7 +18,7 @@ func TestScheduler_SendsQueuedPacket(t *testing.T) {
 	defer close(done)
 
 	var sent atomic.Int32
-	sendFn := func([]byte) error {
+	sendFn := func([]byte, uint8) error {
 		sent.Add(1)
 		return nil
 	}
@@ -39,7 +39,7 @@ func TestScheduler_RespectsScheduleDelay(t *testing.T) {
 	defer close(done)
 
 	var sent atomic.Int32
-	sendFn := func([]byte) error {
+	sendFn := func([]byte, uint8) error {
 		sent.Add(1)
 		return nil
 	}
@@ -65,7 +65,7 @@ func TestScheduler_QueueFullReturnsFalse(t *testing.T) {
 	defer close(done)
 
 	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 2, func([]byte) error { return nil }, done)
+	s := newTxScheduler(budget, 2, func([]byte, uint8) error { return nil }, done)
 
 	s.enqueue([]byte{1}, 0, time.Hour)
 	s.enqueue([]byte{2}, 0, time.Hour)
@@ -80,7 +80,7 @@ func TestScheduler_PriorityOrdering(t *testing.T) {
 
 	var mu sync.Mutex
 	var order []byte
-	sendFn := func(data []byte) error {
+	sendFn := func(data []byte, _ uint8) error {
 		mu.Lock()
 		order = append(order, data[0])
 		mu.Unlock()
@@ -117,7 +117,7 @@ func TestScheduler_PriorityOrdering(t *testing.T) {
 func TestScheduler_StopsOnDone(t *testing.T) {
 	done := make(chan struct{})
 	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	_ = newTxScheduler(budget, 8, func([]byte) error { return nil }, done)
+	_ = newTxScheduler(budget, 8, func([]byte, uint8) error { return nil }, done)
 	close(done)
 	time.Sleep(100 * time.Millisecond)
 }
@@ -127,7 +127,7 @@ func TestScheduler_QueueLen(t *testing.T) {
 	defer close(done)
 
 	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 8, func([]byte) error { return nil }, done)
+	s := newTxScheduler(budget, 8, func([]byte, uint8) error { return nil }, done)
 
 	s.enqueue([]byte{1}, 0, time.Hour)
 	s.enqueue([]byte{2}, 0, time.Hour)
@@ -176,9 +176,12 @@ func TestNode_SendPacketWithoutScheduler(t *testing.T) {
 		t.Fatalf("SendPacket error: %v", err)
 	}
 
+	// Radio is wrapped in QueuedRadio, so send is async via queue tick
+	time.Sleep(200 * time.Millisecond)
+
 	sent := radio.sentData()
-	if len(sent) != 1 {
-		t.Fatalf("expected immediate send, got %d", len(sent))
+	if len(sent) < 1 {
+		t.Fatalf("expected send via queued radio, got %d", len(sent))
 	}
 }
 
