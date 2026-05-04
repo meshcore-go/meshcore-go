@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"sync"
 	"testing"
+	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
@@ -148,6 +149,9 @@ func TestNode_SendPacket(t *testing.T) {
 	if err := n.SendPacket(pkt); err != nil {
 		t.Fatalf("SendPacket error: %v", err)
 	}
+
+	// Send goes through QueuedRadio queue
+	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
 	if len(sent) != 1 {

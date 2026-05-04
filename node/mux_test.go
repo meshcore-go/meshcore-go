@@ -3,6 +3,7 @@ package node
 import (
 	"sync"
 	"testing"
+	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
@@ -55,6 +56,7 @@ func muxFloodPacket(payloadType byte, payload []byte) []byte {
 func TestMux_BroadcastDeliveredToAll(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -76,6 +78,7 @@ func TestMux_BroadcastDeliveredToAll(t *testing.T) {
 func TestMux_GroupTextDeliveredToAll(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -94,6 +97,7 @@ func TestMux_GroupTextDeliveredToAll(t *testing.T) {
 func TestMux_PacketFilterSelectsReceivers(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -118,6 +122,7 @@ func TestMux_PacketFilterSelectsReceivers(t *testing.T) {
 func TestMux_NoFilterAcceptsAll(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -136,6 +141,7 @@ func TestMux_NoFilterAcceptsAll(t *testing.T) {
 func TestMux_NoAcceptorsDropsPacket(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -157,12 +163,16 @@ func TestMux_NoAcceptorsDropsPacket(t *testing.T) {
 func TestMux_SendGoesToModem(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 
 	if err := radio.SendData([]byte{0xDE, 0xAD}); err != nil {
 		t.Fatalf("SendData error: %v", err)
 	}
+
+	// SendData now goes through the mux queue
+	time.Sleep(200 * time.Millisecond)
 
 	sent := modem.sentData()
 	if len(sent) != 1 {
@@ -176,6 +186,7 @@ func TestMux_SendGoesToModem(t *testing.T) {
 func TestMux_CloseDetachesVirtualRadio(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 	callCount := 0
@@ -193,6 +204,7 @@ func TestMux_CloseDetachesVirtualRadio(t *testing.T) {
 func TestMux_InvalidPacketSilentlyDropped(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 	callCount := 0
@@ -208,6 +220,7 @@ func TestMux_InvalidPacketSilentlyDropped(t *testing.T) {
 func TestMux_PacketsCopiedPerVirtualRadio(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
@@ -231,6 +244,7 @@ func TestMux_PacketsCopiedPerVirtualRadio(t *testing.T) {
 func TestMux_SignalMetadataPropagated(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 
@@ -253,6 +267,7 @@ func TestMux_SignalMetadataPropagated(t *testing.T) {
 func TestMux_RawDataHandlerReceivesBytes(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 
@@ -281,6 +296,7 @@ func TestMux_RawDataHandlerReceivesBytes(t *testing.T) {
 func TestMux_BothHandlersCalledTogether(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	radio := mux.NewRadio()
 
@@ -301,7 +317,8 @@ func TestMux_BothHandlersCalledTogether(t *testing.T) {
 
 func TestMux_NoRadiosDoesNotPanic(t *testing.T) {
 	modem := &mockModem{}
-	_ = NewRadioMux(modem)
+	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	modem.inject(muxFloodPacket(meshcore.PayloadTypeAdvert, []byte{0x01}))
 }
@@ -309,6 +326,7 @@ func TestMux_NoRadiosDoesNotPanic(t *testing.T) {
 func TestMux_MultipleAttachAndDetach(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 
 	r1 := mux.NewRadio()
 	r2 := mux.NewRadio()
@@ -337,6 +355,7 @@ func TestMux_MultipleAttachAndDetach(t *testing.T) {
 func TestMux_OutboundHandlerCalledOnSend(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 	radio := mux.NewRadio()
 
 	var captured []byte
@@ -357,6 +376,7 @@ func TestMux_OutboundHandlerCalledOnSend(t *testing.T) {
 func TestMux_MultipleOutboundHandlers(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 	radio := mux.NewRadio()
 
 	var count int
@@ -375,6 +395,7 @@ func TestMux_MultipleOutboundHandlers(t *testing.T) {
 func TestMux_OutboundHandlerPerRadio(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)
+	defer mux.Stop()
 	radioA := mux.NewRadio()
 	radioB := mux.NewRadio()
 
@@ -391,5 +412,60 @@ func TestMux_OutboundHandlerPerRadio(t *testing.T) {
 	}
 	if countB != 0 {
 		t.Errorf("radioB handler: got %d, want 0", countB)
+	}
+}
+
+func TestMux_EnqueuePriority(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	defer mux.Stop()
+
+	radio := mux.NewRadio()
+
+	radio.Enqueue([]byte{0x01}, PrioritySend, 0)
+	radio.Enqueue([]byte{0x02}, PriorityDirectRelay, 0)
+
+	time.Sleep(200 * time.Millisecond)
+
+	sent := modem.sentData()
+	if len(sent) < 2 {
+		t.Fatalf("expected 2 sent, got %d", len(sent))
+	}
+	if sent[0][0] != 0x02 {
+		t.Errorf("first sent = %X, want 02 (higher priority)", sent[0])
+	}
+}
+
+func TestMux_TxQueueLen(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	defer mux.Stop()
+
+	radio := mux.NewRadio()
+
+	radio.Enqueue([]byte{0x01}, 0, time.Hour)
+	radio.Enqueue([]byte{0x02}, 0, time.Hour)
+
+	if radio.TxQueueLen() != 2 {
+		t.Errorf("TxQueueLen = %d, want 2", radio.TxQueueLen())
+	}
+}
+
+func TestMux_SharedQueueAcrossRadios(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	defer mux.Stop()
+
+	radioA := mux.NewRadio()
+	radioB := mux.NewRadio()
+
+	radioA.Enqueue([]byte{0xAA}, PrioritySend, 0)
+	radioB.Enqueue([]byte{0xBB}, PrioritySend, 0)
+
+	time.Sleep(200 * time.Millisecond)
+
+	sent := modem.sentData()
+	if len(sent) != 2 {
+		t.Fatalf("expected 2 sent, got %d", len(sent))
 	}
 }

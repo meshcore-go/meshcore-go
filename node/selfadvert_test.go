@@ -17,7 +17,7 @@ func TestSelfAdvert_SendsOnStart(t *testing.T) {
 		WithAdvertInterval(time.Hour),
 	)
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
 	if len(sent) == 0 {

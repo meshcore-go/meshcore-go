@@ -12,14 +12,14 @@ type txScheduler struct {
 	mu     sync.Mutex
 	budget *airtimeBudget
 	queue  *txQueue
-	send   func([]byte) error
+	send   func(data []byte, priority uint8) error
 	errH   func(error)
 
 	nextTxTime time.Time
 	done       chan struct{}
 }
 
-func newTxScheduler(budget *airtimeBudget, maxQueue int, send func([]byte) error, done chan struct{}) *txScheduler {
+func newTxScheduler(budget *airtimeBudget, maxQueue int, send func(data []byte, priority uint8) error, done chan struct{}) *txScheduler {
 	s := &txScheduler{
 		budget: budget,
 		queue:  newTxQueue(maxQueue),
@@ -97,7 +97,7 @@ func (s *txScheduler) checkSend() {
 
 	sendStart := time.Now()
 
-	err := s.send(popped.data)
+	err := s.send(popped.data, popped.priority)
 	if err != nil {
 		if s.errH != nil {
 			s.errH(err)

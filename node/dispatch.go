@@ -11,6 +11,8 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 	default:
 	}
 
+	n.retries.handlePacket(pkt)
+
 	if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 		if !n.router.dedup.HasSeen(pkt) {
 			n.dispatchPacket(pkt)
