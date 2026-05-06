@@ -14,10 +14,11 @@ type mockTransport struct {
 	frameH   func(*KissFrame)
 	errorH   func(error)
 	connectF func(ctx context.Context) error
+	dead     chan struct{}
 }
 
 func newMockTransport() *mockTransport {
-	return &mockTransport{}
+	return &mockTransport{dead: make(chan struct{})}
 }
 
 func (m *mockTransport) Connect(ctx context.Context) error {
@@ -38,6 +39,7 @@ func (m *mockTransport) Send(data []byte) error {
 
 func (m *mockTransport) SetFrameHandler(h func(*KissFrame)) { m.frameH = h }
 func (m *mockTransport) SetErrorHandler(h func(error))      { m.errorH = h }
+func (m *mockTransport) Dead() <-chan struct{}              { return m.dead }
 
 // sentFrames returns copies of all raw bytes sent through the transport.
 func (m *mockTransport) sentFrames() [][]byte {
@@ -548,7 +550,7 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 
 func TestKissModem_OutboundHandlerCalledBeforeSend(t *testing.T) {
 	mt := newMockTransport()
-	m := NewKissModem(mt)
+	m := NewKissModem(mt, WithTxFlowControl(0))
 
 	var captured []byte
 	m.AddOutboundHandler(func(data []byte) {
@@ -572,7 +574,7 @@ func TestKissModem_OutboundHandlerCalledBeforeSend(t *testing.T) {
 
 func TestKissModem_MultipleOutboundHandlers(t *testing.T) {
 	mt := newMockTransport()
-	m := NewKissModem(mt)
+	m := NewKissModem(mt, WithTxFlowControl(0))
 
 	var count int
 	m.AddOutboundHandler(func([]byte) { count++ })

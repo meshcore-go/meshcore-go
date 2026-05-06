@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-const DefaultMaxTxQueue = 32
+const DefaultMaxTxQueue = 64
 
 type txEntry struct {
 	data        []byte
