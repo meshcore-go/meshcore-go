@@ -193,7 +193,12 @@ func (m *RadioMux) drainQueue() {
 		if entry == nil {
 			return
 		}
-		_ = m.modem.SendData(entry.data)
+		if err := m.modem.SendData(entry.data); err != nil {
+			m.txMu.Lock()
+			m.queue.add(entry.data, entry.priority, time.Now())
+			m.txMu.Unlock()
+			return
+		}
 	}
 }
 

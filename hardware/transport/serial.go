@@ -21,6 +21,7 @@ type SerialTransport struct {
 	onFrame   FrameHandler
 	onError   ErrorHandler
 	done      chan struct{}
+	dead      chan struct{}
 	closeOnce sync.Once
 }
 
@@ -28,6 +29,7 @@ func NewSerialTransport(config SerialConfig) *SerialTransport {
 	return &SerialTransport{
 		config: config,
 		done:   make(chan struct{}),
+		dead:   make(chan struct{}),
 	}
 }
 
@@ -43,7 +45,7 @@ func (t *SerialTransport) Connect(_ context.Context) error {
 	}
 
 	t.port = port
-	go readLoop(t.port, t.done, t.onFrame, t.onError)
+	go readLoop(t.port, t.done, t.dead, t.onFrame, t.onError)
 
 	return nil
 }
@@ -75,4 +77,8 @@ func (t *SerialTransport) SetFrameHandler(h func(*hardware.KissFrame)) {
 
 func (t *SerialTransport) SetErrorHandler(h func(error)) {
 	t.onError = h
+}
+
+func (t *SerialTransport) Dead() <-chan struct{} {
+	return t.dead
 }

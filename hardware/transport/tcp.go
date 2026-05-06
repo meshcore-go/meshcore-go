@@ -19,6 +19,7 @@ type TCPTransport struct {
 	onFrame   FrameHandler
 	onError   ErrorHandler
 	done      chan struct{}
+	dead      chan struct{}
 	closeOnce sync.Once
 }
 
@@ -26,6 +27,7 @@ func NewTCPTransport(config TCPConfig) *TCPTransport {
 	return &TCPTransport{
 		config: config,
 		done:   make(chan struct{}),
+		dead:   make(chan struct{}),
 	}
 }
 
@@ -37,7 +39,7 @@ func (t *TCPTransport) Connect(ctx context.Context) error {
 	}
 
 	t.conn = conn
-	go readLoop(t.conn, t.done, t.onFrame, t.onError)
+	go readLoop(t.conn, t.done, t.dead, t.onFrame, t.onError)
 
 	return nil
 }
@@ -69,4 +71,8 @@ func (t *TCPTransport) SetFrameHandler(h func(*hardware.KissFrame)) {
 
 func (t *TCPTransport) SetErrorHandler(h func(error)) {
 	t.onError = h
+}
+
+func (t *TCPTransport) Dead() <-chan struct{} {
+	return t.dead
 }

@@ -207,6 +207,20 @@ Typed methods wrapping all companion commands:
 
 `hardware/transport` is a separate module providing Serial and TCP transports for direct hardware connections.
 
+#### Backpressure & Reliability
+
+The `KissModem` buffers up to 64 inbound frames (configurable via `WithInboundBuffer`). If the buffer fills (e.g., handlers are slow), the **oldest frame is dropped** to keep the transport read loop flowing — the modem will never block on receive. A warning is logged when this occurs.
+
+Each transport exposes a `Dead() <-chan struct{}` channel that closes when the read loop exits (I/O error, disconnection). Select on this to detect a dead transport and trigger reconnection at a higher layer.
+
+If the byte stream becomes corrupted (remainder exceeds max frame size without a valid FEND), the parser discards the buffered bytes and resyncs at the next frame boundary.
+
+#### TX Flow Control
+
+TX flow control is **enabled by default** (5-second fixed timeout). After each `SendData` call, the modem blocks until `HW_RESP_TX_DONE` is received from the firmware. If the response doesn't arrive within the timeout, `SendData` returns `ErrTxTimeout` and the packet is re-enqueued by the transmit queue for retry on the next drain cycle.
+
+For production use, provide an airtime estimator via `WithTxAirtimeEstimator(fn)` to compute per-packet timeouts dynamically as **1.5× estimated airtime** (matching the C++ MeshCore dispatcher). Use `WithTxFlowControl(0)` to disable flow control entirely.
+
 ### Node Runtime (`node`)
 
 | Type | Description |
@@ -217,6 +231,10 @@ Typed methods wrapping all companion commands:
 | `Peer` / `PeerTable` | Peer tracking and path management |
 | `Scheduler` | TX scheduling with duty-cycle enforcement |
 | `TxQueue` | Priority-based transmit queue |
+
+#### Handler Contract
+
+Packet handlers registered via `Node.OnPacket` and `Radio.SetDataHandler` are invoked **synchronously** on the receive goroutine. Handlers must return promptly — a blocking handler stalls the entire receive pipeline for that radio. If you need to do slow work (I/O, network calls, heavy computation), dispatch to your own goroutine or channel from within the handler.
 
 ## Development
 

@@ -18,9 +18,15 @@ type Transport interface {
 	Send(data []byte) error
 	SetFrameHandler(func(*hardware.KissFrame))
 	SetErrorHandler(func(error))
+	// Dead returns a channel that is closed when the read loop has exited
+	// (due to I/O error or connection loss). Callers can select on this to
+	// detect that the transport is no longer receiving.
+	Dead() <-chan struct{}
 }
 
-func readLoop(conn io.Reader, done <-chan struct{}, onFrame FrameHandler, onError ErrorHandler) {
+func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame FrameHandler, onError ErrorHandler) {
+	defer close(dead)
+
 	buf := make([]byte, 1024)
 	var remainder []byte
 
@@ -37,6 +43,13 @@ func readLoop(conn io.Reader, done <-chan struct{}, onFrame FrameHandler, onErro
 			data := append(remainder, buf[:n]...)
 			frames, rem, decodeErrs := hardware.ExtractFrames(data)
 			remainder = rem
+
+			if len(remainder) > hardware.KISS_MAX_FRAME_SIZE {
+				if onError != nil {
+					onError(fmt.Errorf("kiss: remainder exceeded max frame size, resyncing"))
+				}
+				remainder = nil
+			}
 
 			for _, err := range decodeErrs {
 				if onError != nil {

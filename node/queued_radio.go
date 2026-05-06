@@ -75,7 +75,12 @@ func (q *QueuedRadio) drain() {
 		if entry == nil {
 			return
 		}
-		_ = q.inner.SendData(entry.data)
+		if err := q.inner.SendData(entry.data); err != nil {
+			q.mu.Lock()
+			q.queue.add(entry.data, entry.priority, time.Now())
+			q.mu.Unlock()
+			return
+		}
 	}
 }
 
