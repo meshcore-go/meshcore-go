@@ -11,5 +11,3 @@ require (
 	github.com/creack/goselect v0.1.2 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 )
-
-replace github.com/meshcore-go/meshcore-go => ../../
