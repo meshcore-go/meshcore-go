@@ -77,6 +77,7 @@ const (
 	HW_ERR_MAC_FAILED     = 0x04
 	HW_ERR_UNKNOWN_CMD    = 0x05
 	HW_ERR_ENCRYPT_FAILED = 0x06
+	HW_ERR_TX_BUSY        = 0x07
 
 	// Firmware Version
 	KISS_FIRMWARE_VERSION = 1

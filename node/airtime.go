@@ -1,7 +1,6 @@
 package node
 
 import (
-	"sync"
 	"time"
 )
 
@@ -19,7 +18,6 @@ const (
 type AirtimeEstimator func(packetLen int) uint32
 
 type airtimeBudget struct {
-	mu             sync.Mutex
 	txBudgetMs     float64
 	lastUpdate     time.Time
 	windowMs       float64

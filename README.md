@@ -28,7 +28,8 @@ meshcore-go/
     router.go                 # Packet routing and forwarding
     peer.go                   # Peer tracking and management
     mux.go                    # Radio multiplexer (multi-modem support)
-    scheduler.go              # TX scheduling and duty-cycle management
+    tx_engine.go              # Shared TX engine: queue, airtime budget, drain loop
+    flood_delay.go            # Flood retransmit delay calculation
     channel.go                # Channel/group configuration
     dedup.go                  # Packet deduplication
     dispatch.go               # Incoming packet dispatch
@@ -209,7 +210,7 @@ Typed methods wrapping all companion commands:
 
 #### Backpressure & Reliability
 
-The `KissModem` buffers up to 64 inbound frames (configurable via `WithInboundBuffer`). If the buffer fills (e.g., handlers are slow), the **oldest frame is dropped** to keep the transport read loop flowing — the modem will never block on receive. A warning is logged when this occurs.
+The `KissModem` buffers up to 1024 inbound frames (configurable via `WithInboundBuffer`). If the buffer fills (e.g., handlers are slow), the **oldest frame is dropped** to keep the transport read loop flowing — the modem will never block on receive. A warning is logged when this occurs.
 
 Each transport exposes a `Dead() <-chan struct{}` channel that closes when the read loop exits (I/O error, disconnection). Select on this to detect a dead transport and trigger reconnection at a higher layer.
 
@@ -217,9 +218,7 @@ If the byte stream becomes corrupted (remainder exceeds max frame size without a
 
 #### TX Flow Control
 
-TX flow control is **enabled by default** (5-second fixed timeout). After each `SendData` call, the modem blocks until `HW_RESP_TX_DONE` is received from the firmware. If the response doesn't arrive within the timeout, `SendData` returns `ErrTxTimeout` and the packet is re-enqueued by the transmit queue for retry on the next drain cycle.
-
-For production use, provide an airtime estimator via `WithTxAirtimeEstimator(fn)` to compute per-packet timeouts dynamically as **1.5× estimated airtime** (matching the C++ MeshCore dispatcher). Use `WithTxFlowControl(0)` to disable flow control entirely.
+TX flow control is **enabled by default** (5-second fixed timeout). After each `SendData` call, the modem blocks until `HW_RESP_TX_DONE` or `HW_RESP_ERROR` is received from the firmware. If no response arrives within the timeout, `SendData` returns `ErrTxTimeout`. On `HW_ERR_TX_BUSY` it returns `ErrTxBusy`; other hardware errors return `ErrTxFailed`. The transmit queue drops packets on any send error.
 
 ### Node Runtime (`node`)
 
@@ -227,9 +226,9 @@ For production use, provide an airtime estimator via `WithTxAirtimeEstimator(fn)
 |------|-------------|
 | `Node` | Full mesh node: identity, radio, routing, scheduling |
 | `Router` | Packet routing and forwarding decisions |
-| `RadioMux` | Multi-modem multiplexer |
+| `RadioMux` | Multi-modem multiplexer with shared TX engine |
+| `QueuedRadio` | Single-radio TX queue wrapper with shared TX engine |
 | `Peer` / `PeerTable` | Peer tracking and path management |
-| `Scheduler` | TX scheduling with duty-cycle enforcement |
 | `TxQueue` | Priority-based transmit queue |
 
 #### Handler Contract

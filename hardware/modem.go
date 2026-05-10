@@ -6,17 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const rxMetaTimeout = 1 * time.Second
 
 // DefaultInboundBuffer is the default capacity of the inbound frame channel.
-const DefaultInboundBuffer = 64
+const DefaultInboundBuffer = 1024
 
 const DefaultTxTimeout = 5 * time.Second
 
-var ErrTxTimeout = errors.New("kiss: tx done timeout")
+var (
+	ErrTxTimeout = errors.New("kiss: tx done timeout")
+	ErrTxBusy    = errors.New("kiss: radio busy")
+	ErrTxFailed  = errors.New("kiss: tx failed")
+)
 
 // Transport is the interface that hardware transports must implement.
 type Transport interface {
@@ -75,25 +80,20 @@ func WithTxFlowControl(timeout time.Duration) ModemOption {
 		if timeout == 0 {
 			m.txFlowControl = false
 			m.txTimeout = 0
-			m.txTimeoutFn = nil
 		} else {
 			m.txFlowControl = true
 			m.txTimeout = timeout
-			m.txTimeoutFn = nil
 		}
 	}
 }
 
-// WithTxAirtimeEstimator sets a dynamic TX timeout based on estimated airtime.
-// The timeout for each packet is 1.5× the estimated airtime (matching the C++
-// MeshCore dispatcher). This overrides any fixed timeout set via WithTxFlowControl.
+// WithTxAirtimeEstimator is deprecated and has no effect. TX timeout is now a
+// fixed value (DefaultTxTimeout) that acts as a dead-radio detector. The
+// firmware handles CSMA timing internally and always sends TX_DONE.
+// Airtime estimation should only be used for queue scheduling, not TX timeout.
 func WithTxAirtimeEstimator(estimator func(packetLen int) uint32) ModemOption {
 	return func(m *KissModem) {
-		m.txFlowControl = true
-		m.txTimeoutFn = func(packetLen int) time.Duration {
-			airtimeMs := estimator(packetLen)
-			return time.Duration(airtimeMs*3/2) * time.Millisecond
-		}
+		// no-op: TX timeout is fixed, airtime estimation is for queue scheduling only
 	}
 }
 
@@ -107,8 +107,8 @@ type KissModem struct {
 
 	txFlowControl bool
 	txTimeout     time.Duration
-	txTimeoutFn   func(packetLen int) time.Duration
-	txDone        chan struct{}
+	txResult      chan error
+	txPending     atomic.Bool
 
 	inbound chan *KissFrame
 	flush   chan chan struct{}
@@ -154,7 +154,7 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	m.flush = make(chan chan struct{})
 	m.done = make(chan struct{})
 	if m.txFlowControl {
-		m.txDone = make(chan struct{}, 1)
+		m.txResult = make(chan error, 1)
 	}
 	m.drainWg.Add(1)
 	go m.drainInbound()
@@ -262,7 +262,7 @@ func (m *KissModem) AddOutboundHandler(h func([]byte)) {
 }
 
 // SendData sends a data frame. If TX flow control is enabled, blocks until
-// HW_RESP_TX_DONE is received or the TX timeout expires.
+// HW_RESP_TX_DONE or HW_RESP_ERROR is received, or the TX timeout expires.
 func (m *KissModem) SendData(data []byte) error {
 	m.outboundMu.RLock()
 	handlers := m.outboundH
@@ -273,13 +273,15 @@ func (m *KissModem) SendData(data []byte) error {
 
 	if m.txFlowControl {
 		select {
-		case <-m.txDone:
+		case <-m.txResult:
 		default:
 		}
 	}
 
 	frame := EncodeFrame(m.kissPort, KISS_CMD_DATA, data)
+	m.txPending.Store(true)
 	if err := m.transport.Send(frame); err != nil {
+		m.txPending.Store(false)
 		return err
 	}
 
@@ -287,17 +289,15 @@ func (m *KissModem) SendData(data []byte) error {
 		return nil
 	}
 
-	timeout := m.txTimeout
-	if m.txTimeoutFn != nil {
-		timeout = m.txTimeoutFn(len(data))
-	}
-
 	select {
-	case <-m.txDone:
-		return nil
-	case <-time.After(timeout):
+	case err := <-m.txResult:
+		m.txPending.Store(false)
+		return err
+	case <-time.After(m.txTimeout):
+		m.txPending.Store(false)
 		return ErrTxTimeout
 	case <-m.done:
+		m.txPending.Store(false)
 		return nil
 	}
 }
@@ -471,16 +471,17 @@ func (m *KissModem) enqueueFrame(frame *KissFrame) {
 	case <-m.done:
 		return
 	default:
-		// Channel full — drop oldest to keep the read loop flowing.
 		select {
 		case <-m.inbound:
 		default:
 		}
 		select {
 		case m.inbound <- frame:
+			m.log.Warn("inbound buffer full, dropped oldest frame")
 		case <-m.done:
+		default:
+			m.log.Warn("inbound buffer full, dropped new frame")
 		}
-		m.log.Warn("inbound buffer full, dropped oldest frame")
 	}
 }
 
@@ -524,10 +525,23 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 		return
 	}
 
-	if subCmd == HW_RESP_TX_DONE && m.txDone != nil {
+	if subCmd == HW_RESP_TX_DONE && m.txResult != nil && m.txPending.Load() {
 		select {
-		case m.txDone <- struct{}{}:
+		case m.txResult <- nil:
 		default:
+		}
+	}
+
+	if subCmd == HW_RESP_ERROR && m.txResult != nil && m.txPending.Load() && len(data) >= 1 {
+		if data[0] == HW_ERR_TX_BUSY {
+			select {
+			case m.txResult <- ErrTxBusy:
+			default:
+			}
+		} else {
+			// Non-TX error (e.g. HW_ERR_ENCRYPT_FAILED, HW_ERR_UNKNOWN_CMD) —
+			// ignore for TX flow control; the 5s timeout handles real TX failures.
+			m.log.Debug("ignoring non-TX hardware error during send", "code", data[0])
 		}
 	}
 
