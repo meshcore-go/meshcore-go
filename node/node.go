@@ -26,6 +26,7 @@ type Node struct {
 	identityMu sync.RWMutex
 	identity   meshcore.LocalIdentity
 	radio      Radio
+	txRadio    TxRadio
 	router     router
 	peers      *PeerTable
 	secrets    *secretCache
@@ -33,13 +34,8 @@ type Node struct {
 	retries    *retryTracker
 	channels   channelTable
 	regions    *RegionMap
-	scheduler  *txScheduler
 	log        *slog.Logger
-
-	airtimeFactor    float64
-	dutyCycleWindow  time.Duration
-	airtimeEstimator AirtimeEstimator
-	maxTxQueue       int
+	txCfg      nodeTxConfig
 
 	advertData     *meshcore.AdvertAppData
 	advertInterval time.Duration
@@ -57,6 +53,13 @@ type Node struct {
 }
 
 type Option func(*Node)
+
+type nodeTxConfig struct {
+	airtimeFactor    float64
+	dutyCycleWindow  time.Duration
+	airtimeEstimator AirtimeEstimator
+	maxTxQueue       int
+}
 
 func WithErrorHandler(h func(error)) Option {
 	return func(n *Node) {
@@ -123,25 +126,25 @@ func WithRegions(regions ...*meshcore.Region) Option {
 
 func WithAirtimeEstimator(est AirtimeEstimator) Option {
 	return func(n *Node) {
-		n.airtimeEstimator = est
+		n.txCfg.airtimeEstimator = est
 	}
 }
 
 func WithAirtimeFactor(factor float64) Option {
 	return func(n *Node) {
-		n.airtimeFactor = factor
+		n.txCfg.airtimeFactor = factor
 	}
 }
 
 func WithDutyCycleWindow(d time.Duration) Option {
 	return func(n *Node) {
-		n.dutyCycleWindow = d
+		n.txCfg.dutyCycleWindow = d
 	}
 }
 
 func WithMaxTxQueue(max int) Option {
 	return func(n *Node) {
-		n.maxTxQueue = max
+		n.txCfg.maxTxQueue = max
 	}
 }
 
@@ -153,18 +156,20 @@ func WithMaxChannels(max int) Option {
 
 func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	n := &Node{
-		identity:        identity,
-		radio:           radio,
-		peers:           NewPeerTable(DefaultMaxPeers),
-		secrets:         newSecretCache(identity),
-		channels:        newChannelTable(DefaultMaxChannels),
-		regions:         NewRegionMap(),
-		airtimeFactor:   DefaultAirtimeFactor,
-		dutyCycleWindow: DefaultDutyCycleWindow,
-		maxTxQueue:      DefaultMaxTxQueue,
-		advertInterval:  DefaultAdvertInterval,
-		handlers:        make(map[byte][]PacketHandler),
-		done:            make(chan struct{}),
+		identity: identity,
+		radio:    radio,
+		peers:    NewPeerTable(DefaultMaxPeers),
+		secrets:  newSecretCache(identity),
+		channels: newChannelTable(DefaultMaxChannels),
+		regions:  NewRegionMap(),
+		txCfg: nodeTxConfig{
+			airtimeFactor:   DefaultAirtimeFactor,
+			dutyCycleWindow: DefaultDutyCycleWindow,
+			maxTxQueue:      DefaultMaxTxQueue,
+		},
+		advertInterval: DefaultAdvertInterval,
+		handlers:       make(map[byte][]PacketHandler),
+		done:           make(chan struct{}),
 	}
 	n.router.node = n
 	for _, opt := range opts {
@@ -174,48 +179,44 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 		n.log = slog.Default()
 	}
 
-	// Ensure the radio supports queued transmission. If not, wrap it.
 	txRadio, ok := radio.(TxRadio)
 	if !ok {
-		txRadio = NewQueuedRadio(radio, n.maxTxQueue, n.done)
+		queuedOpts := []QueuedRadioOption{
+			WithQueuedRadioLogger(n.log),
+			WithQueuedRadioErrorHandler(n.dispatchError),
+			WithQueuedRadioMaxQueue(n.txCfg.maxTxQueue),
+		}
+		if n.txCfg.airtimeEstimator != nil {
+			queuedOpts = append(queuedOpts, WithQueuedRadioAirtimeBudget(newAirtimeBudget(n.txCfg.airtimeFactor, n.txCfg.dutyCycleWindow, n.txCfg.airtimeEstimator)))
+		}
+		txRadio = NewQueuedRadio(radio, n.done, queuedOpts...)
 		n.radio = txRadio
+	} else if n.txCfg.airtimeEstimator != nil {
+		n.log.Warn("WithAirtimeEstimator ignored: radio already implements TxRadio; configure airtime on the RadioMux or TxRadio directly")
 	}
+	n.txRadio = txRadio
 
-	if n.airtimeEstimator != nil {
-		budget := newAirtimeBudget(n.airtimeFactor, n.dutyCycleWindow, n.airtimeEstimator)
-		sendFn := func(data []byte, priority uint8) error {
-			if !txRadio.Enqueue(data, priority, 0) {
-				return ErrTxQueueFull
-			}
-			return nil
+	airtimeEstimator := n.txCfg.airtimeEstimator
+	n.router.send = func(data []byte) error {
+		delay := time.Duration(0)
+		if airtimeEstimator != nil {
+			delay = FloodRetransmitDelay(airtimeEstimator(len(data)))
 		}
-		n.scheduler = newTxScheduler(budget, n.maxTxQueue, sendFn, n.done)
-		n.scheduler.setErrorHandler(func(err error) {
-			n.dispatchError(err)
-		})
-		n.router.send = func(data []byte) error {
-			estAirtime := n.airtimeEstimator(len(data))
-			delay := FloodRetransmitDelay(estAirtime)
-			if !n.scheduler.enqueue(data, PriorityFloodRelay, delay) {
-				return ErrTxQueueFull
-			}
-			return nil
+		if !n.txRadio.Enqueue(data, PriorityFloodRelay, delay) {
+			return ErrTxQueueFull
 		}
-		n.router.sendDirect = func(data []byte) error {
-			if !n.scheduler.enqueue(data, PriorityDirectRelay, 0) {
-				return ErrTxQueueFull
-			}
-			return nil
+		return nil
+	}
+	n.router.sendDirect = func(data []byte) error {
+		if !n.txRadio.Enqueue(data, PriorityDirectRelay, 0) {
+			return ErrTxQueueFull
 		}
-	} else {
-		n.router.send = func(data []byte) error {
-			return txRadio.SendData(data)
-		}
+		return nil
 	}
 
 	n.acks = newACKTracker(n.done)
 	n.retries = newRetryTracker(n.sendPacketRaw, n.done)
-	radio.SetDataHandler(n.onData)
+	n.radio.SetDataHandler(n.onData)
 
 	if n.advertData != nil {
 		go n.selfAdvert()
@@ -350,13 +351,10 @@ func (n *Node) sendPacketRaw(pkt *meshcore.Packet) error {
 	if err != nil {
 		return err
 	}
-	if n.scheduler != nil {
-		if !n.scheduler.enqueue(data, PrioritySend, 0) {
-			return ErrTxQueueFull
-		}
-		return nil
+	if !n.txRadio.Enqueue(data, PrioritySend, 0) {
+		return ErrTxQueueFull
 	}
-	return n.radio.SendData(data)
+	return nil
 }
 
 type GroupSendResult struct {
@@ -525,13 +523,7 @@ func (n *Node) buildRetryPacket(original *meshcore.Packet, attempt, directRetrie
 }
 
 func (n *Node) TxQueueLen() int {
-	if n.scheduler != nil {
-		return n.scheduler.queueLen()
-	}
-	if txr, ok := n.radio.(TxRadio); ok {
-		return txr.TxQueueLen()
-	}
-	return 0
+	return n.txRadio.TxQueueLen()
 }
 
 func (n *Node) Stop() {

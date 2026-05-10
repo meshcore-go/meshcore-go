@@ -117,93 +117,103 @@ type RadioMux struct {
 	mu     sync.RWMutex
 	radios []*virtualRadio
 
-	txMu  sync.Mutex
-	queue *txQueue
-	done  chan struct{}
+	tx       *txEngine
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
-type MuxOption func(*RadioMux)
+type muxConfig struct {
+	log              *slog.Logger
+	errH             func(error)
+	txOpts           []txEngineOption
+	airtimeEstimator AirtimeEstimator
+	airtimeFactor    float64
+	dutyCycleWindow  time.Duration
+}
+
+type MuxOption func(*muxConfig)
 
 func WithMuxLogger(l *slog.Logger) MuxOption {
-	return func(m *RadioMux) {
-		m.log = l
+	return func(c *muxConfig) {
+		c.log = l
+		c.txOpts = append(c.txOpts, withTxLogger(l))
 	}
 }
 
 func WithMuxErrorHandler(h func(error)) MuxOption {
-	return func(m *RadioMux) {
-		m.errH = h
+	return func(c *muxConfig) {
+		c.errH = h
+		c.txOpts = append(c.txOpts, withTxErrorHandler(h))
 	}
 }
 
 func WithMuxMaxTxQueue(max int) MuxOption {
-	return func(m *RadioMux) {
-		m.queue = newTxQueue(max)
+	return func(c *muxConfig) {
+		c.txOpts = append(c.txOpts, withTxMaxQueue(max))
+	}
+}
+
+func WithMuxAirtimeEstimator(est AirtimeEstimator) MuxOption {
+	return func(c *muxConfig) {
+		c.airtimeEstimator = est
+	}
+}
+
+func WithMuxAirtimeFactor(f float64) MuxOption {
+	return func(c *muxConfig) {
+		c.airtimeFactor = f
+	}
+}
+
+func WithMuxDutyCycleWindow(d time.Duration) MuxOption {
+	return func(c *muxConfig) {
+		c.dutyCycleWindow = d
+	}
+}
+
+func WithMuxRetryable(fn func(error) bool) MuxOption {
+	return func(c *muxConfig) {
+		c.txOpts = append(c.txOpts, withTxRetryable(fn))
 	}
 }
 
 func NewRadioMux(modem Modem, opts ...MuxOption) *RadioMux {
-	m := &RadioMux{
-		modem: modem,
-		queue: newTxQueue(DefaultMaxTxQueue),
-		done:  make(chan struct{}),
+	cfg := muxConfig{
+		airtimeFactor:   DefaultAirtimeFactor,
+		dutyCycleWindow: DefaultDutyCycleWindow,
 	}
 	for _, opt := range opts {
-		opt(m)
+		opt(&cfg)
 	}
-	if m.log == nil {
-		m.log = slog.Default()
+	if cfg.airtimeEstimator != nil {
+		cfg.txOpts = append(cfg.txOpts, withTxAirtimeBudget(newAirtimeBudget(cfg.airtimeFactor, cfg.dutyCycleWindow, cfg.airtimeEstimator)))
 	}
+	if cfg.log == nil {
+		cfg.log = slog.Default()
+	}
+	m := &RadioMux{
+		modem: modem,
+		log:   cfg.log,
+		errH:  cfg.errH,
+		done:  make(chan struct{}),
+	}
+	m.tx = newTxEngine(modem.SendData, m.done, cfg.txOpts...)
 	modem.SetDataHandler(m.onData)
-	go m.txLoop()
 	return m
 }
 
 func (m *RadioMux) enqueue(data []byte, priority uint8, delay time.Duration) bool {
-	m.txMu.Lock()
-	ok := m.queue.add(data, priority, time.Now().Add(delay))
-	m.txMu.Unlock()
-	return ok
+	return m.tx.enqueue(data, priority, delay)
 }
 
 func (m *RadioMux) txQueueLen() int {
-	m.txMu.Lock()
-	defer m.txMu.Unlock()
-	return m.queue.len()
-}
-
-func (m *RadioMux) txLoop() {
-	ticker := time.NewTicker(queuedRadioTickInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.done:
-			return
-		case <-ticker.C:
-			m.drainQueue()
-		}
-	}
-}
-
-func (m *RadioMux) drainQueue() {
-	for {
-		m.txMu.Lock()
-		entry := m.queue.pop(time.Now())
-		m.txMu.Unlock()
-		if entry == nil {
-			return
-		}
-		if err := m.modem.SendData(entry.data); err != nil {
-			m.txMu.Lock()
-			m.queue.add(entry.data, entry.priority, time.Now())
-			m.txMu.Unlock()
-			return
-		}
-	}
+	return m.tx.queueLen()
 }
 
 func (m *RadioMux) Stop() {
-	close(m.done)
+	m.stopOnce.Do(func() {
+		close(m.done)
+	})
 }
 
 func (m *RadioMux) NewRadio() MuxRadio {

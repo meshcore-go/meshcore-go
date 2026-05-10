@@ -1,39 +1,68 @@
 package node
 
 import (
-	"sync"
+	"log/slog"
 	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
-
-const queuedRadioTickInterval = 50 * time.Millisecond
 
 // QueuedRadio wraps a plain Radio with a serializing transmit queue.
 // All sends are funneled through a single goroutine, preventing
 // concurrent writes to the underlying radio.
 type QueuedRadio struct {
 	inner Radio
-	mu    sync.Mutex
-	queue *txQueue
-	done  chan struct{}
+	tx    *txEngine
 }
 
-func NewQueuedRadio(inner Radio, maxQueue int, done chan struct{}) *QueuedRadio {
-	q := &QueuedRadio{
-		inner: inner,
-		queue: newTxQueue(maxQueue),
-		done:  done,
+type queuedRadioConfig struct {
+	txOpts []txEngineOption
+}
+
+type QueuedRadioOption func(*queuedRadioConfig)
+
+func WithQueuedRadioLogger(l *slog.Logger) QueuedRadioOption {
+	return func(c *queuedRadioConfig) {
+		c.txOpts = append(c.txOpts, withTxLogger(l))
 	}
-	go q.loop()
+}
+
+func WithQueuedRadioErrorHandler(h func(error)) QueuedRadioOption {
+	return func(c *queuedRadioConfig) {
+		c.txOpts = append(c.txOpts, withTxErrorHandler(h))
+	}
+}
+
+func WithQueuedRadioMaxQueue(max int) QueuedRadioOption {
+	return func(c *queuedRadioConfig) {
+		c.txOpts = append(c.txOpts, withTxMaxQueue(max))
+	}
+}
+
+func WithQueuedRadioAirtimeBudget(budget *airtimeBudget) QueuedRadioOption {
+	return func(c *queuedRadioConfig) {
+		c.txOpts = append(c.txOpts, withTxAirtimeBudget(budget))
+	}
+}
+
+func WithQueuedRadioRetryable(fn func(error) bool) QueuedRadioOption {
+	return func(c *queuedRadioConfig) {
+		c.txOpts = append(c.txOpts, withTxRetryable(fn))
+	}
+}
+
+func NewQueuedRadio(inner Radio, done chan struct{}, opts ...QueuedRadioOption) *QueuedRadio {
+	cfg := queuedRadioConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	q := &QueuedRadio{inner: inner}
+	q.tx = newTxEngine(inner.SendData, done, cfg.txOpts...)
 	return q
 }
 
 func (q *QueuedRadio) Enqueue(data []byte, priority uint8, delay time.Duration) bool {
-	q.mu.Lock()
-	ok := q.queue.add(data, priority, time.Now().Add(delay))
-	q.mu.Unlock()
-	return ok
+	return q.tx.enqueue(data, priority, delay)
 }
 
 func (q *QueuedRadio) SendData(data []byte) error {
@@ -44,44 +73,12 @@ func (q *QueuedRadio) SendData(data []byte) error {
 }
 
 func (q *QueuedRadio) TxQueueLen() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.queue.len()
+	return q.tx.queueLen()
 }
 
 func (q *QueuedRadio) SetDataHandler(h func(*meshcore.Packet))      { q.inner.SetDataHandler(h) }
 func (q *QueuedRadio) SetRawDataHandler(h func([]byte, int8, int8)) { q.inner.SetRawDataHandler(h) }
 func (q *QueuedRadio) AddOutboundHandler(h func([]byte))            { q.inner.AddOutboundHandler(h) }
 func (q *QueuedRadio) Close() error                                 { return q.inner.Close() }
-
-func (q *QueuedRadio) loop() {
-	ticker := time.NewTicker(queuedRadioTickInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-q.done:
-			return
-		case <-ticker.C:
-			q.drain()
-		}
-	}
-}
-
-func (q *QueuedRadio) drain() {
-	for {
-		q.mu.Lock()
-		entry := q.queue.pop(time.Now())
-		q.mu.Unlock()
-		if entry == nil {
-			return
-		}
-		if err := q.inner.SendData(entry.data); err != nil {
-			q.mu.Lock()
-			q.queue.add(entry.data, entry.priority, time.Now())
-			q.mu.Unlock()
-			return
-		}
-	}
-}
 
 var _ TxRadio = (*QueuedRadio)(nil)

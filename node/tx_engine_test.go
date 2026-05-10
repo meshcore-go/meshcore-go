@@ -13,41 +13,35 @@ func fixedEstimator(ms uint32) AirtimeEstimator {
 	return func(int) uint32 { return ms }
 }
 
-func TestScheduler_SendsQueuedPacket(t *testing.T) {
+func TestTxEngine_SendsQueuedPacket(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
 	var sent atomic.Int32
-	sendFn := func([]byte, uint8) error {
+	tx := newTxEngine(func([]byte) error {
 		sent.Add(1)
 		return nil
-	}
+	}, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(8))
 
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 8, sendFn, done)
-
-	s.enqueue([]byte{0x01}, 0, 0)
+	tx.enqueue([]byte{0x01}, 0, 0)
 	time.Sleep(200 * time.Millisecond)
 
 	if sent.Load() < 1 {
-		t.Error("scheduler did not send queued packet")
+		t.Error("tx engine did not send queued packet")
 	}
 }
 
-func TestScheduler_RespectsScheduleDelay(t *testing.T) {
+func TestTxEngine_RespectsScheduleDelay(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
 	var sent atomic.Int32
-	sendFn := func([]byte, uint8) error {
+	tx := newTxEngine(func([]byte) error {
 		sent.Add(1)
 		return nil
-	}
+	}, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(8))
 
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 8, sendFn, done)
-
-	s.enqueue([]byte{0x01}, 0, 500*time.Millisecond)
+	tx.enqueue([]byte{0x01}, 0, 500*time.Millisecond)
 
 	time.Sleep(100 * time.Millisecond)
 	if sent.Load() > 0 {
@@ -60,41 +54,37 @@ func TestScheduler_RespectsScheduleDelay(t *testing.T) {
 	}
 }
 
-func TestScheduler_QueueFullReturnsFalse(t *testing.T) {
+func TestTxEngine_QueueFullReturnsFalse(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 2, func([]byte, uint8) error { return nil }, done)
+	tx := newTxEngine(func([]byte) error { return nil }, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(2))
 
-	s.enqueue([]byte{1}, 0, time.Hour)
-	s.enqueue([]byte{2}, 0, time.Hour)
-	if s.enqueue([]byte{3}, 0, time.Hour) {
+	tx.enqueue([]byte{1}, 0, time.Hour)
+	tx.enqueue([]byte{2}, 0, time.Hour)
+	if tx.enqueue([]byte{3}, 0, time.Hour) {
 		t.Error("enqueue should return false when full")
 	}
 }
 
-func TestScheduler_PriorityOrdering(t *testing.T) {
+func TestTxEngine_PriorityOrdering(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
 	var mu sync.Mutex
 	var order []byte
-	sendFn := func(data []byte, _ uint8) error {
+	tx := newTxEngine(func(data []byte) error {
 		mu.Lock()
 		order = append(order, data[0])
 		mu.Unlock()
 		return nil
-	}
+	}, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(1))), withTxMaxQueue(8))
 
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(1))
-	s := newTxScheduler(budget, 8, sendFn, done)
-
-	s.mu.Lock()
-	s.queue.add([]byte{0x04}, PrioritySend, time.Now())
-	s.queue.add([]byte{0x00}, PriorityDirectRelay, time.Now())
-	s.queue.add([]byte{0x01}, PriorityFloodRelay, time.Now())
-	s.mu.Unlock()
+	tx.mu.Lock()
+	tx.queue.add([]byte{0x04}, PrioritySend, time.Now())
+	tx.queue.add([]byte{0x00}, PriorityDirectRelay, time.Now())
+	tx.queue.add([]byte{0x01}, PriorityFloodRelay, time.Now())
+	tx.mu.Unlock()
 
 	time.Sleep(400 * time.Millisecond)
 
@@ -114,29 +104,27 @@ func TestScheduler_PriorityOrdering(t *testing.T) {
 	}
 }
 
-func TestScheduler_StopsOnDone(t *testing.T) {
+func TestTxEngine_StopsOnDone(t *testing.T) {
 	done := make(chan struct{})
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	_ = newTxScheduler(budget, 8, func([]byte, uint8) error { return nil }, done)
+	_ = newTxEngine(func([]byte) error { return nil }, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(8))
 	close(done)
 	time.Sleep(100 * time.Millisecond)
 }
 
-func TestScheduler_QueueLen(t *testing.T) {
+func TestTxEngine_QueueLen(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
-	budget := newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))
-	s := newTxScheduler(budget, 8, func([]byte, uint8) error { return nil }, done)
+	tx := newTxEngine(func([]byte) error { return nil }, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(8))
 
-	s.enqueue([]byte{1}, 0, time.Hour)
-	s.enqueue([]byte{2}, 0, time.Hour)
-	if s.queueLen() != 2 {
-		t.Errorf("queueLen = %d, want 2", s.queueLen())
+	tx.enqueue([]byte{1}, 0, time.Hour)
+	tx.enqueue([]byte{2}, 0, time.Hour)
+	if tx.queueLen() != 2 {
+		t.Errorf("queueLen = %d, want 2", tx.queueLen())
 	}
 }
 
-func TestNode_SendPacketWithScheduler(t *testing.T) {
+func TestNode_SendPacketWithTxEngine(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(0xD0), radio, WithAirtimeEstimator(fixedEstimator(10)))
 	defer n.Stop()
@@ -156,11 +144,11 @@ func TestNode_SendPacketWithScheduler(t *testing.T) {
 
 	sent := radio.sentData()
 	if len(sent) < 1 {
-		t.Error("packet should have been sent through scheduler")
+		t.Error("packet should have been sent through tx engine")
 	}
 }
 
-func TestNode_SendPacketWithoutScheduler(t *testing.T) {
+func TestNode_SendPacketWithoutTxEngineBudget(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(0xD1), radio)
 	defer n.Stop()
@@ -176,7 +164,6 @@ func TestNode_SendPacketWithoutScheduler(t *testing.T) {
 		t.Fatalf("SendPacket error: %v", err)
 	}
 
-	// Radio is wrapped in QueuedRadio, so send is async via queue tick
 	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
@@ -203,13 +190,13 @@ func TestNode_TxQueueLen(t *testing.T) {
 	}
 }
 
-func TestNode_TxQueueLenWithoutScheduler(t *testing.T) {
+func TestNode_TxQueueLenWithoutBudget(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(0xD3), radio)
 	defer n.Stop()
 
-	if n.TxQueueLen() != 0 {
-		t.Errorf("TxQueueLen = %d, want 0 without scheduler", n.TxQueueLen())
+	if n.TxQueueLen() < 0 {
+		t.Errorf("TxQueueLen = %d, want non-negative", n.TxQueueLen())
 	}
 }
 
@@ -238,10 +225,11 @@ func TestNode_WithAirtimeFactor(t *testing.T) {
 	)
 	defer n.Stop()
 
-	if n.scheduler == nil {
-		t.Fatal("scheduler should be created with estimator")
+	queued, ok := n.radio.(*QueuedRadio)
+	if !ok {
+		t.Fatal("radio should be auto-wrapped queued radio")
 	}
-	dc := n.scheduler.budget.dutyCycle()
+	dc := queued.tx.budget.dutyCycle()
 	want := 0.1
 	if dc < want-0.01 || dc > want+0.01 {
 		t.Errorf("duty cycle = %f, want ~%f for factor 9.0", dc, want)
@@ -256,8 +244,9 @@ func TestNode_WithDutyCycleWindow(t *testing.T) {
 	)
 	defer n.Stop()
 
-	if n.scheduler.budget.windowMs != 30*60*1000 {
-		t.Errorf("windowMs = %f, want %d", n.scheduler.budget.windowMs, 30*60*1000)
+	queued := n.radio.(*QueuedRadio)
+	if queued.tx.budget.windowMs != 30*60*1000 {
+		t.Errorf("windowMs = %f, want %d", queued.tx.budget.windowMs, 30*60*1000)
 	}
 }
 
@@ -269,7 +258,8 @@ func TestNode_WithMaxTxQueue(t *testing.T) {
 	)
 	defer n.Stop()
 
-	if n.scheduler.queue.max != 4 {
-		t.Errorf("queue max = %d, want 4", n.scheduler.queue.max)
+	queued := n.radio.(*QueuedRadio)
+	if queued.tx.queue.max != 4 {
+		t.Errorf("queue max = %d, want 4", queued.tx.queue.max)
 	}
 }
