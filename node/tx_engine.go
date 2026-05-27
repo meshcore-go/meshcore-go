@@ -3,12 +3,22 @@ package node
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const queuedRadioTickInterval = 50 * time.Millisecond
 
 const txBusyBackoff = 200 * time.Millisecond
+
+// TxStats holds runtime counters reported by txEngine.Stats.
+type TxStats struct {
+	Sent          uint64
+	BusyRequeued  uint64
+	BusyDropped   uint64
+	Failed        uint64
+	QueueRejected uint64
+}
 
 type txEngine struct {
 	mu         sync.Mutex
@@ -20,6 +30,12 @@ type txEngine struct {
 	log        *slog.Logger
 	errH       func(error)
 	done       chan struct{}
+
+	statSent          atomic.Uint64
+	statBusyRequeued  atomic.Uint64
+	statBusyDropped   atomic.Uint64
+	statFailed        atomic.Uint64
+	statQueueRejected atomic.Uint64
 }
 
 type txEngineConfig struct {
@@ -87,7 +103,20 @@ func (e *txEngine) enqueue(data []byte, priority uint8, delay time.Duration) boo
 	e.mu.Lock()
 	ok := e.queue.add(data, priority, time.Now().Add(delay))
 	e.mu.Unlock()
+	if !ok {
+		e.statQueueRejected.Add(1)
+	}
 	return ok
+}
+
+func (e *txEngine) stats() TxStats {
+	return TxStats{
+		Sent:          e.statSent.Load(),
+		BusyRequeued:  e.statBusyRequeued.Load(),
+		BusyDropped:   e.statBusyDropped.Load(),
+		Failed:        e.statFailed.Load(),
+		QueueRejected: e.statQueueRejected.Load(),
+	}
 }
 
 func (e *txEngine) queueLen() int {
@@ -154,11 +183,14 @@ func (e *txEngine) drain() {
 				ok := e.queue.add(popped.data, popped.priority, time.Now().Add(txBusyBackoff))
 				e.mu.Unlock()
 				if ok {
+					e.statBusyRequeued.Add(1)
 					e.log.Debug("tx busy, re-enqueued packet", "error", err, "data_len", len(popped.data))
 				} else {
+					e.statBusyDropped.Add(1)
 					e.log.Warn("tx busy, queue full, dropping packet", "error", err, "data_len", len(popped.data))
 				}
 			} else {
+				e.statFailed.Add(1)
 				e.log.Warn("tx failed, dropping packet", "error", err, "data_len", len(popped.data))
 			}
 			if e.errH != nil {
@@ -166,6 +198,8 @@ func (e *txEngine) drain() {
 			}
 			return
 		}
+
+		e.statSent.Add(1)
 
 		if e.budget != nil {
 			actualMs := uint64(time.Since(sendStart).Milliseconds())

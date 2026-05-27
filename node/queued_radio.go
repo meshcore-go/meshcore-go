@@ -76,6 +76,10 @@ func (q *QueuedRadio) TxQueueLen() int {
 	return q.tx.queueLen()
 }
 
+func (q *QueuedRadio) TxStats() TxStats {
+	return q.tx.stats()
+}
+
 func (q *QueuedRadio) SetDataHandler(h func(*meshcore.Packet))                      { q.inner.SetDataHandler(h) }
 func (q *QueuedRadio) SetRawDataHandler(h func([]byte, int8, int8, bool))           { q.inner.SetRawDataHandler(h) }
 func (q *QueuedRadio) AddOutboundHandler(h func([]byte))                            { q.inner.AddOutboundHandler(h) }

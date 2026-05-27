@@ -210,6 +210,10 @@ func (m *RadioMux) txQueueLen() int {
 	return m.tx.queueLen()
 }
 
+func (m *RadioMux) TxStats() TxStats {
+	return m.tx.stats()
+}
+
 func (m *RadioMux) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.done)

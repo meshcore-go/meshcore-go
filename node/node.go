@@ -526,9 +526,25 @@ func (n *Node) TxQueueLen() int {
 	return n.txRadio.TxQueueLen()
 }
 
+// TxStats returns runtime counters from the underlying transmit engine.
+// Returns the zero value if the underlying radio does not expose stats.
+func (n *Node) TxStats() TxStats {
+	type txStatser interface{ TxStats() TxStats }
+	if s, ok := n.txRadio.(txStatser); ok {
+		return s.TxStats()
+	}
+	return TxStats{}
+}
+
+// Stop signals shutdown to background goroutines and closes the radio.
+// It is safe to call Stop multiple times; only the first call closes the
+// radio.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.done)
+		if n.radio != nil {
+			_ = n.radio.Close()
+		}
 	})
 }
 
