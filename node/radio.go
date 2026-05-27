@@ -9,7 +9,7 @@ import (
 type Radio interface {
 	SendData(data []byte) error
 	SetDataHandler(func(pkt *meshcore.Packet))
-	SetRawDataHandler(func(data []byte, snr int8, rssi int8))
+	SetRawDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool))
 	AddOutboundHandler(h func([]byte))
 	Close() error
 }

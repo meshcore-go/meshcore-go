@@ -144,5 +144,6 @@ func (r *router) clonePacket(pkt *meshcore.Packet) *meshcore.Packet {
 	}
 	clone.SNR = pkt.SNR
 	clone.RSSI = pkt.RSSI
+	clone.HasSignalInfo = pkt.HasSignalInfo
 	return clone
 }

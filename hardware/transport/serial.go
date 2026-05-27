@@ -45,7 +45,7 @@ func (t *SerialTransport) Connect(_ context.Context) error {
 	}
 
 	t.port = port
-	go readLoop(t.port, t.done, t.dead, t.onFrame, t.onError)
+	go readLoop(t.port, t.done, t.dead, t.onFrame, t.onError, nil)
 
 	return nil
 }

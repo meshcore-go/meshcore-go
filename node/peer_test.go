@@ -43,7 +43,7 @@ func TestPeerTable_UpdateAndLookup(t *testing.T) {
 	id := peerIdentity(0x01)
 	adv := makeSignedAdvert(id, 100, "alice")
 
-	if ok := pt.Update(adv, -5, -80, nil); !ok {
+	if ok := pt.Update(adv, -5, -80, false, nil); !ok {
 		t.Fatal("Update returned false for new peer")
 	}
 	if pt.Count() != 1 {
@@ -75,8 +75,8 @@ func TestPeerTable_UpdateExisting(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x02)
 
-	pt.Update(makeSignedAdvert(id, 100, "bob"), -5, -80, nil)
-	pt.Update(makeSignedAdvert(id, 200, "bob2"), -3, -70, nil)
+	pt.Update(makeSignedAdvert(id, 100, "bob"), -5, -80, false, nil)
+	pt.Update(makeSignedAdvert(id, 200, "bob2"), -3, -70, false, nil)
 
 	if pt.Count() != 1 {
 		t.Fatalf("Count = %d, want 1", pt.Count())
@@ -97,12 +97,12 @@ func TestPeerTable_ReplayProtection(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x03)
 
-	pt.Update(makeSignedAdvert(id, 100, "carol"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(id, 100, "carol"), 0, 0, false, nil)
 
-	if ok := pt.Update(makeSignedAdvert(id, 100, "carol-replay"), 0, 0, nil); ok {
+	if ok := pt.Update(makeSignedAdvert(id, 100, "carol-replay"), 0, 0, false, nil); ok {
 		t.Fatal("Update should reject equal timestamp (replay)")
 	}
-	if ok := pt.Update(makeSignedAdvert(id, 50, "carol-old"), 0, 0, nil); ok {
+	if ok := pt.Update(makeSignedAdvert(id, 50, "carol-old"), 0, 0, false, nil); ok {
 		t.Fatal("Update should reject older timestamp")
 	}
 
@@ -115,7 +115,7 @@ func TestPeerTable_ReplayProtection(t *testing.T) {
 func TestPeerTable_LookupByHash(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x04)
-	pt.Update(makeSignedAdvert(id, 100, "dave"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(id, 100, "dave"), 0, 0, false, nil)
 
 	hash := id.Hash()
 	peers := pt.LookupByHash(hash)
@@ -136,7 +136,7 @@ func TestPeerTable_LookupByHash(t *testing.T) {
 func TestPeerTable_LookupByHash_NoMatch(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x05)
-	pt.Update(makeSignedAdvert(id, 100, "eve"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(id, 100, "eve"), 0, 0, false, nil)
 
 	peers := pt.LookupByHash([]byte{0xFF})
 	for _, p := range peers {
@@ -149,7 +149,7 @@ func TestPeerTable_LookupByHash_NoMatch(t *testing.T) {
 func TestPeerTable_Remove(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x06)
-	pt.Update(makeSignedAdvert(id, 100, "frank"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(id, 100, "frank"), 0, 0, false, nil)
 
 	if !pt.Remove(id.PublicKey()) {
 		t.Fatal("Remove returned false for existing peer")
@@ -166,7 +166,7 @@ func TestPeerTable_Peers(t *testing.T) {
 	pt := NewPeerTable(10)
 	for i := range byte(5) {
 		id := peerIdentity(0x10 + i)
-		pt.Update(makeSignedAdvert(id, uint32(100+i), "peer"), 0, 0, nil)
+		pt.Update(makeSignedAdvert(id, uint32(100+i), "peer"), 0, 0, false, nil)
 	}
 
 	peers := pt.Peers()
@@ -184,7 +184,7 @@ func TestPeerTable_LRUEviction(t *testing.T) {
 	}
 
 	for i := range 3 {
-		pt.Update(makeSignedAdvert(ids[i], uint32(100+i), "p"), 0, 0, nil)
+		pt.Update(makeSignedAdvert(ids[i], uint32(100+i), "p"), 0, 0, false, nil)
 		time.Sleep(time.Millisecond)
 	}
 
@@ -192,7 +192,7 @@ func TestPeerTable_LRUEviction(t *testing.T) {
 		t.Fatalf("Count = %d, want 3", pt.Count())
 	}
 
-	pt.Update(makeSignedAdvert(ids[3], 200, "new"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(ids[3], 200, "new"), 0, 0, false, nil)
 
 	if pt.Count() != 3 {
 		t.Fatalf("Count after eviction = %d, want 3", pt.Count())
@@ -209,7 +209,7 @@ func TestPeerTable_LRUEviction(t *testing.T) {
 func TestPeerTable_LookupReturnsACopy(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x30)
-	pt.Update(makeSignedAdvert(id, 100, "original"), 0, 0, nil)
+	pt.Update(makeSignedAdvert(id, 100, "original"), 0, 0, false, nil)
 
 	p := pt.Lookup(id.PublicKey())
 	p.Name = "mutated"
@@ -224,7 +224,7 @@ func TestPeerTable_UpdateStoresPath(t *testing.T) {
 	pt := NewPeerTable(10)
 	id := peerIdentity(0x31)
 	path := []byte{0xAA, 0xBB, 0xCC}
-	pt.Update(makeSignedAdvert(id, 100, "pathtest"), 0, 0, path)
+	pt.Update(makeSignedAdvert(id, 100, "pathtest"), 0, 0, false, path)
 
 	p := pt.Lookup(id.PublicKey())
 	if len(p.OutPath) != 3 || p.OutPath[0] != 0xAA || p.OutPath[1] != 0xBB || p.OutPath[2] != 0xCC {

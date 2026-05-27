@@ -92,6 +92,9 @@ func TestModem_SignalReportDisabled_ImmediateDispatch(t *testing.T) {
 	if received[0].SNR != 0 || received[0].RSSI != 0 {
 		t.Error("expected zero SNR/RSSI when signal report disabled")
 	}
+	if received[0].HasSignalInfo {
+		t.Error("expected HasSignalInfo=false when signal report disabled")
+	}
 }
 
 func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
@@ -121,6 +124,9 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 	}
 	if received[0].RSSI != -80 {
 		t.Errorf("RSSI = %d, want -80", received[0].RSSI)
+	}
+	if !received[0].HasSignalInfo {
+		t.Error("expected HasSignalInfo=true after RX_META enrichment")
 	}
 	if len(received[0].Data) != 1 || received[0].Data[0] != 0xAA {
 		t.Errorf("data = %X, want AA", received[0].Data)
@@ -159,6 +165,9 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 	if stale.SNR != 0 || stale.RSSI != 0 {
 		t.Errorf("stale frame should have zero SNR/RSSI, got SNR=%d RSSI=%d", stale.SNR, stale.RSSI)
 	}
+	if stale.HasSignalInfo {
+		t.Error("expected HasSignalInfo=false for stale-flushed frame")
+	}
 	if stale.Data[0] != 0x01 {
 		t.Errorf("stale frame data = %X, want 01", stale.Data)
 	}
@@ -179,6 +188,9 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 	mu.Unlock()
 	if enriched.SNR != 5 || enriched.RSSI != -50 {
 		t.Errorf("enriched frame SNR=%d RSSI=%d, want 5/-50", enriched.SNR, enriched.RSSI)
+	}
+	if !enriched.HasSignalInfo {
+		t.Error("expected HasSignalInfo=true for enriched frame")
 	}
 	if enriched.Data[0] != 0x02 {
 		t.Errorf("enriched frame data = %X, want 02", enriched.Data)
@@ -223,6 +235,9 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 	mu.Unlock()
 	if flushed.SNR != 0 || flushed.RSSI != 0 {
 		t.Errorf("timeout-flushed frame should have zero SNR/RSSI, got SNR=%d RSSI=%d", flushed.SNR, flushed.RSSI)
+	}
+	if flushed.HasSignalInfo {
+		t.Error("expected HasSignalInfo=false for timeout-flushed frame")
 	}
 	if flushed.Data[0] != 0xFF {
 		t.Errorf("data = %X, want FF", flushed.Data)
@@ -359,7 +374,7 @@ func TestModem_DataHandler(t *testing.T) {
 	modem := NewKissModem(mt) // signal report disabled
 
 	var dataReceived [][]byte
-	modem.SetDataHandler(func(data []byte, _ int8, _ int8) {
+	modem.SetDataHandler(func(data []byte, _ int8, _ int8, _ bool) {
 		dataReceived = append(dataReceived, data)
 	})
 

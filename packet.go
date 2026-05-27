@@ -15,8 +15,9 @@ type Packet struct {
 	TransportCode1 uint16 // Little Endian
 	TransportCode2 uint16 // Little Endian
 
-	SNR  int8
-	RSSI int8
+	SNR           int8
+	RSSI          int8
+	HasSignalInfo bool
 
 	pathHashSize  uint8
 	pathHashCount uint8

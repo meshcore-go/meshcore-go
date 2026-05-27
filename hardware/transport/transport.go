@@ -24,7 +24,12 @@ type Transport interface {
 	Dead() <-chan struct{}
 }
 
-func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame FrameHandler, onError ErrorHandler) {
+// beforeRead is an optional hook invoked before each conn.Read. Transports
+// use it to refresh per-read deadlines (e.g. TCP idle timeouts). A non-nil
+// error from the hook is reported via onError and terminates the loop.
+type beforeReadFunc = func() error
+
+func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame FrameHandler, onError ErrorHandler, beforeRead beforeReadFunc) {
 	defer close(dead)
 
 	buf := make([]byte, 1024)
@@ -35,6 +40,15 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame 
 		case <-done:
 			return
 		default:
+		}
+
+		if beforeRead != nil {
+			if err := beforeRead(); err != nil {
+				if onError != nil {
+					onError(fmt.Errorf("set read deadline: %w", err))
+				}
+				return
+			}
 		}
 
 		n, err := conn.Read(buf)

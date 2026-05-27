@@ -96,8 +96,9 @@ type KissFrame struct {
 	Command byte
 	Data    []byte
 
-	SNR  int8
-	RSSI int8
+	SNR           int8
+	RSSI          int8
+	HasSignalInfo bool
 }
 
 // RadioConfig holds the radio configuration parameters.

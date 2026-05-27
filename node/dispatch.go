@@ -52,7 +52,7 @@ func (n *Node) handleAdvert(pkt *meshcore.Packet) {
 		return
 	}
 
-	n.peers.Update(adv, pkt.SNR, pkt.RSSI, pkt.Path)
+	n.peers.Update(adv, pkt.SNR, pkt.RSSI, pkt.HasSignalInfo, pkt.Path)
 }
 
 func (n *Node) dispatchPacket(pkt *meshcore.Packet) {

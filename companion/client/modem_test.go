@@ -62,12 +62,14 @@ func TestCompanionModem_ReceivePush(t *testing.T) {
 	var gotData []byte
 	var gotSNR int8
 	var gotRSSI int8
+	var gotHasSignalInfo bool
 
-	m.SetDataHandler(func(data []byte, snr int8, rssi int8) {
+	m.SetDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool) {
 		mu.Lock()
 		gotData = data
 		gotSNR = snr
 		gotRSSI = rssi
+		gotHasSignalInfo = hasSignalInfo
 		mu.Unlock()
 	})
 
@@ -95,6 +97,9 @@ func TestCompanionModem_ReceivePush(t *testing.T) {
 	}
 	if gotRSSI != -42 {
 		t.Errorf("RSSI = %d, want -42", gotRSSI)
+	}
+	if !gotHasSignalInfo {
+		t.Error("expected HasSignalInfo=true for companion modem")
 	}
 }
 
