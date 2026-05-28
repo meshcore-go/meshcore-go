@@ -21,6 +21,7 @@ type Peer struct {
 	Feat1               uint16
 	Feat2               uint16
 	OutPath             []byte // Stored path hashes for direct routing.
+	OutPathHashSize     uint8  // Bytes per hop hash (1, 2, or 4). 0 means default (1).
 	LastAdvertTimestamp uint32 // Timestamp from the peer's clock (replay protection).
 	LastSeen            time.Time
 	SNR                 int8
@@ -194,7 +195,10 @@ func (pt *PeerTable) Peers() []Peer {
 }
 
 // SetOutPath sets the outbound path for a peer. Returns false if peer not found.
-func (pt *PeerTable) SetOutPath(pubKey [meshcore.PubKeySize]byte, path []byte) bool {
+// A nil path clears the path (unknown). A non-nil zero-length slice marks the
+// peer as a direct neighbor (0 hops, no routing needed).
+// hashSize is the bytes-per-hop (1, 2, or 4); pass 0 to leave unchanged.
+func (pt *PeerTable) SetOutPath(pubKey [meshcore.PubKeySize]byte, path []byte, hashSize ...uint8) bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
@@ -202,12 +206,18 @@ func (pt *PeerTable) SetOutPath(pubKey [meshcore.PubKeySize]byte, path []byte) b
 	if !ok {
 		return false
 	}
-	if len(path) == 0 {
+	if path == nil {
 		p.OutPath = nil
+		p.OutPathHashSize = 0
+	} else if len(path) == 0 {
+		p.OutPath = []byte{}
 	} else {
 		out := make([]byte, len(path))
 		copy(out, path)
 		p.OutPath = out
+	}
+	if len(hashSize) > 0 && hashSize[0] > 0 {
+		p.OutPathHashSize = hashSize[0]
 	}
 	return true
 }

@@ -238,3 +238,156 @@ func TestPeerTable_DefaultMaxPeers(t *testing.T) {
 		t.Errorf("maxPeers = %d, want %d", pt.maxPeers, DefaultMaxPeers)
 	}
 }
+
+func TestPeerTable_SetOutPath(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x30)
+	adv := makeSignedAdvert(id, 1, "test")
+	pt.Update(adv, 0, 0, false, nil)
+
+	key := id.PublicKey()
+
+	// Set a path with hash size
+	ok := pt.SetOutPath(key, []byte{0xAA, 0xBB}, 2)
+	if !ok {
+		t.Fatal("SetOutPath returned false")
+	}
+	p := pt.Lookup(key)
+	if len(p.OutPath) != 2 || p.OutPath[0] != 0xAA || p.OutPath[1] != 0xBB {
+		t.Errorf("OutPath = %x, want [AA BB]", p.OutPath)
+	}
+	if p.OutPathHashSize != 2 {
+		t.Errorf("OutPathHashSize = %d, want 2", p.OutPathHashSize)
+	}
+}
+
+func TestPeerTable_SetOutPath_DirectNeighbor(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x31)
+	adv := makeSignedAdvert(id, 1, "neighbor")
+	pt.Update(adv, 0, 0, false, nil)
+
+	key := id.PublicKey()
+
+	// Zero-length non-nil = direct neighbor
+	ok := pt.SetOutPath(key, []byte{})
+	if !ok {
+		t.Fatal("SetOutPath returned false")
+	}
+	p := pt.Lookup(key)
+	if p.OutPath == nil {
+		t.Error("OutPath should be non-nil (direct neighbor)")
+	}
+	if len(p.OutPath) != 0 {
+		t.Errorf("OutPath len = %d, want 0", len(p.OutPath))
+	}
+}
+
+func TestPeerTable_SetOutPath_NilClearsPath(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x32)
+	adv := makeSignedAdvert(id, 1, "clearme")
+	pt.Update(adv, 0, 0, false, nil)
+
+	key := id.PublicKey()
+
+	// Set a path first
+	pt.SetOutPath(key, []byte{0x01, 0x02}, 1)
+	p := pt.Lookup(key)
+	if p.OutPath == nil || p.OutPathHashSize == 0 {
+		t.Fatal("precondition: path should be set")
+	}
+
+	// Clear with nil
+	pt.SetOutPath(key, nil)
+	p = pt.Lookup(key)
+	if p.OutPath != nil {
+		t.Errorf("OutPath should be nil after clear, got %x", p.OutPath)
+	}
+	if p.OutPathHashSize != 0 {
+		t.Errorf("OutPathHashSize should be 0 after clear, got %d", p.OutPathHashSize)
+	}
+}
+
+func TestPeerTable_SetOutPath_HashSizePreserved(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x33)
+	adv := makeSignedAdvert(id, 1, "preserve")
+	pt.Update(adv, 0, 0, false, nil)
+
+	key := id.PublicKey()
+
+	// Set path with hash size 2
+	pt.SetOutPath(key, []byte{0xAA, 0xBB, 0xCC, 0xDD}, 2)
+	p := pt.Lookup(key)
+	if p.OutPathHashSize != 2 {
+		t.Fatalf("OutPathHashSize = %d, want 2", p.OutPathHashSize)
+	}
+
+	// Update path without specifying hash size — should preserve existing
+	pt.SetOutPath(key, []byte{0x11, 0x22})
+	p = pt.Lookup(key)
+	if p.OutPathHashSize != 2 {
+		t.Errorf("OutPathHashSize = %d, want 2 (preserved)", p.OutPathHashSize)
+	}
+	if len(p.OutPath) != 2 || p.OutPath[0] != 0x11 {
+		t.Errorf("OutPath = %x, want [11 22]", p.OutPath)
+	}
+}
+
+func TestPeerTable_SetOutPath_NotFound(t *testing.T) {
+	pt := NewPeerTable(10)
+	var key [meshcore.PubKeySize]byte
+	key[0] = 0xFF
+	if pt.SetOutPath(key, []byte{0x01}) {
+		t.Error("SetOutPath should return false for unknown peer")
+	}
+}
+
+func TestPeerTable_ResetOutPath(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x34)
+	adv := makeSignedAdvert(id, 1, "reset")
+	pt.Update(adv, 0, 0, false, nil)
+
+	key := id.PublicKey()
+	pt.SetOutPath(key, []byte{0xAA}, 1)
+
+	ok := pt.ResetOutPath(key)
+	if !ok {
+		t.Fatal("ResetOutPath returned false")
+	}
+	p := pt.Lookup(key)
+	if p.OutPath != nil {
+		t.Errorf("OutPath should be nil after reset, got %x", p.OutPath)
+	}
+	if p.OutPathHashSize != 0 {
+		t.Errorf("OutPathHashSize should be 0 after reset, got %d", p.OutPathHashSize)
+	}
+}
+
+func TestPeerTable_Insert_WithOutPathHashSize(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := seedIdentity(0x35)
+
+	p := &Peer{
+		Identity:        meshcore.NewIdentity(id.PublicKey()),
+		Name:            "inserted",
+		OutPath:         []byte{0x01, 0x02},
+		OutPathHashSize: 2,
+		LastSeen:        time.Now(),
+	}
+	pt.Insert(p)
+
+	key := id.PublicKey()
+	got := pt.Lookup(key)
+	if got == nil {
+		t.Fatal("peer not found after Insert")
+	}
+	if got.OutPathHashSize != 2 {
+		t.Errorf("OutPathHashSize = %d, want 2", got.OutPathHashSize)
+	}
+	if len(got.OutPath) != 2 {
+		t.Errorf("OutPath = %x, want [01 02]", got.OutPath)
+	}
+}
