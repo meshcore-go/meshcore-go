@@ -197,12 +197,12 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	n.txRadio = txRadio
 
 	airtimeEstimator := n.txCfg.airtimeEstimator
-	n.router.send = func(data []byte) error {
+	n.router.send = func(data []byte, priority uint8) error {
 		delay := time.Duration(0)
 		if airtimeEstimator != nil {
 			delay = FloodRetransmitDelay(airtimeEstimator(len(data)))
 		}
-		if !n.txRadio.Enqueue(data, PriorityFloodRelay, delay) {
+		if !n.txRadio.Enqueue(data, priority, delay) {
 			return ErrTxQueueFull
 		}
 		return nil

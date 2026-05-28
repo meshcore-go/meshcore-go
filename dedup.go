@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	MaxPacketHashes = 128
+	MaxPacketHashes = 160 // matches C++ SimpleMeshTables (128+32)
 	MaxACKEntries   = 64
 )
 

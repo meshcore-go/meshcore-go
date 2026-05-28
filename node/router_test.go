@@ -34,7 +34,7 @@ type testRouterOpts struct {
 	identity     meshcore.LocalIdentity
 	allowForward func(*meshcore.Packet) bool
 	allowPacket  func(*meshcore.Packet) bool
-	send         func([]byte) error
+	send         func([]byte, uint8) error
 	sendDirect   func([]byte) error
 }
 
@@ -68,7 +68,7 @@ func TestRouter_FloodForward(t *testing.T) {
 	r := newTestRouter(testRouterOpts{
 		identity:     identity,
 		allowForward: func(*meshcore.Packet) bool { return true },
-		send: func(data []byte) error {
+		send: func(data []byte, _ uint8) error {
 			sent = append(sent, append([]byte(nil), data...))
 			return nil
 		},
@@ -99,7 +99,7 @@ func TestRouter_FloodNoForwardByDefault(t *testing.T) {
 	called := false
 	r := newTestRouter(testRouterOpts{
 		identity: seedIdentity(0x01),
-		send: func([]byte) error {
+		send: func([]byte, uint8) error {
 			called = true
 			return nil
 		},
@@ -121,7 +121,7 @@ func TestRouter_FloodPathFull(t *testing.T) {
 	r := newTestRouter(testRouterOpts{
 		identity:     seedIdentity(0x01),
 		allowForward: func(*meshcore.Packet) bool { return true },
-		send: func([]byte) error {
+		send: func([]byte, uint8) error {
 			called = true
 			return nil
 		},
@@ -142,7 +142,7 @@ func TestRouter_DirectForward(t *testing.T) {
 	r := newTestRouter(testRouterOpts{
 		identity:     identity,
 		allowForward: func(*meshcore.Packet) bool { return true },
-		send: func(data []byte) error {
+		sendDirect: func(data []byte) error {
 			sent = append(sent, append([]byte(nil), data...))
 			return nil
 		},
@@ -179,7 +179,7 @@ func TestRouter_DirectNotNextHop(t *testing.T) {
 	r := newTestRouter(testRouterOpts{
 		identity:     identity,
 		allowForward: func(*meshcore.Packet) bool { return true },
-		send: func([]byte) error {
+		send: func([]byte, uint8) error {
 			called = true
 			return nil
 		},
@@ -201,7 +201,7 @@ func TestRouter_DirectDedup(t *testing.T) {
 	r := newTestRouter(testRouterOpts{
 		identity:     identity,
 		allowForward: func(*meshcore.Packet) bool { return true },
-		send: func([]byte) error {
+		sendDirect: func([]byte) error {
 			sends++
 			return nil
 		},
