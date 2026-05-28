@@ -603,3 +603,120 @@ func TestKissModem_MultipleOutboundHandlers(t *testing.T) {
 		t.Errorf("expected 2 handler calls, got %d", count)
 	}
 }
+
+func TestModem_HandlerWorkers(t *testing.T) {
+	mt := newMockTransport()
+	modem := NewKissModem(mt, WithHandlerWorkers(4))
+	defer modem.Close()
+
+	var mu sync.Mutex
+	var received []*KissFrame
+	modem.SetDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool) {
+		mu.Lock()
+		received = append(received, &KissFrame{Data: data, SNR: snr, RSSI: rssi})
+		mu.Unlock()
+	})
+
+	for i := 0; i < 20; i++ {
+		mt.injectFrame(makeDataFrame([]byte{byte(i)}))
+	}
+	modem.Flush()
+	// Give worker pool time to process
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	count := len(received)
+	mu.Unlock()
+	if count != 20 {
+		t.Fatalf("expected 20 frames dispatched via worker pool, got %d", count)
+	}
+}
+
+func TestModem_HandlerWatchdog(t *testing.T) {
+	mt := newMockTransport()
+	modem := NewKissModem(mt, WithHandlerWatchdog(10*time.Millisecond))
+	defer modem.Close()
+
+	modem.SetFrameHandler(func(f *KissFrame) {
+		time.Sleep(50 * time.Millisecond)
+	})
+
+	mt.injectFrame(makeDataFrame([]byte{0x01}))
+	modem.Flush()
+
+	stats := modem.Stats()
+	if stats.HandlerSlow != 1 {
+		t.Errorf("expected HandlerSlow=1, got %d", stats.HandlerSlow)
+	}
+}
+
+func TestModem_Stats_DroppedFrames(t *testing.T) {
+	mt := newMockTransport()
+	// Use tiny inbound buffer to force drops
+	modem := NewKissModem(mt, WithInboundBuffer(1))
+
+	// Block the drain goroutine by setting a slow handler
+	modem.SetFrameHandler(func(f *KissFrame) {
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	// Inject first frame (fills the buffer while drain is processing)
+	mt.injectFrame(makeDataFrame([]byte{0x01}))
+	// Give drain time to pick up the first frame and start blocking
+	time.Sleep(10 * time.Millisecond)
+
+	// Fill buffer and force drops
+	for i := 0; i < 5; i++ {
+		mt.injectFrame(makeDataFrame([]byte{byte(i + 2)}))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	modem.Close()
+
+	stats := modem.Stats()
+	if stats.InboundDroppedOldest+stats.InboundDroppedNew == 0 {
+		t.Error("expected at least one drop counter to be non-zero")
+	}
+}
+
+func TestModem_Stats_MetaTimeout(t *testing.T) {
+	mt := newMockTransport()
+	modem := NewKissModem(mt, WithSignalReport(true))
+	defer modem.Close()
+
+	var mu sync.Mutex
+	var received []*KissFrame
+	modem.SetFrameHandler(func(f *KissFrame) {
+		mu.Lock()
+		received = append(received, f)
+		mu.Unlock()
+	})
+
+	mt.injectFrame(makeDataFrame([]byte{0xAA}))
+
+	// Wait for timeout
+	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
+
+	stats := modem.Stats()
+	if stats.RxMetaTimeouts != 1 {
+		t.Errorf("expected RxMetaTimeouts=1, got %d", stats.RxMetaTimeouts)
+	}
+}
+
+func TestModem_Stats_MetaMisattributed(t *testing.T) {
+	mt := newMockTransport()
+	modem := NewKissModem(mt, WithSignalReport(true))
+	defer modem.Close()
+
+	modem.SetFrameHandler(func(f *KissFrame) {})
+
+	// Two data frames back-to-back — first one gets replaced (misattributed)
+	mt.injectFrame(makeDataFrame([]byte{0x01}))
+	mt.injectFrame(makeDataFrame([]byte{0x02}))
+	modem.Flush()
+
+	stats := modem.Stats()
+	if stats.RxMetaMisattributed != 1 {
+		t.Errorf("expected RxMetaMisattributed=1, got %d", stats.RxMetaMisattributed)
+	}
+}

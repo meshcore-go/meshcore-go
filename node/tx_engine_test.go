@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -261,5 +262,98 @@ func TestNode_WithMaxTxQueue(t *testing.T) {
 	queued := n.radio.(*QueuedRadio)
 	if queued.tx.queue.max != 4 {
 		t.Errorf("queue max = %d, want 4", queued.tx.queue.max)
+	}
+}
+
+func TestTxEngine_Stats_Sent(t *testing.T) {
+	sent := 0
+	done := make(chan struct{})
+	defer close(done)
+
+	e := newTxEngine(func(data []byte) error {
+		sent++
+		return nil
+	}, done)
+
+	for i := 0; i < 5; i++ {
+		e.enqueue([]byte{byte(i)}, PrioritySend, 0)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	stats := e.stats()
+	if stats.Sent != 5 {
+		t.Errorf("stats.Sent = %d, want 5", stats.Sent)
+	}
+}
+
+func TestTxEngine_Stats_BusyRequeued(t *testing.T) {
+	attempts := 0
+	done := make(chan struct{})
+	defer close(done)
+
+	e := newTxEngine(func(data []byte) error {
+		attempts++
+		if attempts == 1 {
+			return ErrTxQueueFull // first attempt fails with retryable error
+		}
+		return nil
+	}, done, withTxRetryable(func(err error) bool {
+		return err == ErrTxQueueFull
+	}))
+
+	e.enqueue([]byte{0x01}, PrioritySend, 0)
+	time.Sleep(500 * time.Millisecond)
+
+	stats := e.stats()
+	if stats.BusyRequeued < 1 {
+		t.Errorf("stats.BusyRequeued = %d, want >= 1", stats.BusyRequeued)
+	}
+	if stats.Sent < 1 {
+		t.Errorf("stats.Sent = %d, want >= 1 (retry should succeed)", stats.Sent)
+	}
+}
+
+func TestTxEngine_Stats_Failed(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+
+	e := newTxEngine(func(data []byte) error {
+		return errors.New("permanent failure")
+	}, done)
+
+	e.enqueue([]byte{0x01}, PrioritySend, 0)
+	time.Sleep(200 * time.Millisecond)
+
+	stats := e.stats()
+	if stats.Failed != 1 {
+		t.Errorf("stats.Failed = %d, want 1", stats.Failed)
+	}
+	if stats.Sent != 0 {
+		t.Errorf("stats.Sent = %d, want 0", stats.Sent)
+	}
+}
+
+func TestTxEngine_Stats_QueueRejected(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+
+	e := newTxEngine(func(data []byte) error {
+		time.Sleep(500 * time.Millisecond) // block to fill queue
+		return nil
+	}, done, withTxMaxQueue(2))
+
+	// Fill queue
+	e.enqueue([]byte{0x01}, PrioritySend, 0)
+	e.enqueue([]byte{0x02}, PrioritySend, 0)
+
+	// This should be rejected
+	ok := e.enqueue([]byte{0x03}, PrioritySend, 0)
+	if ok {
+		t.Error("expected enqueue to fail (queue full)")
+	}
+
+	stats := e.stats()
+	if stats.QueueRejected != 1 {
+		t.Errorf("stats.QueueRejected = %d, want 1", stats.QueueRejected)
 	}
 }

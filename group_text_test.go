@@ -261,3 +261,86 @@ func TestGroupTextRoundTrip(t *testing.T) {
 		t.Errorf("Decrypt() = %q, want %q", gotTrimmed, plaintext)
 	}
 }
+
+func TestGroupTextPayload_EncryptDecryptRoundTrip(t *testing.T) {
+	ch := NewChannelFromHashtag("test-channel")
+
+	payload := &GroupTextPayload{
+		Timestamp: 1717000000,
+		Flags:     0,
+		Sender:    "Alice",
+		Text:      "Hello, world!",
+	}
+
+	grp, err := payload.Encrypt(ch.Hash, ch.PSK[:])
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	if grp.ChannelHash != ch.Hash {
+		t.Errorf("ChannelHash = 0x%02x, want 0x%02x", grp.ChannelHash, ch.Hash)
+	}
+
+	decoded, err := grp.DecryptStruct(ch.PSK[:])
+	if err != nil {
+		t.Fatalf("DecryptStruct() error: %v", err)
+	}
+	if decoded.Timestamp != payload.Timestamp {
+		t.Errorf("Timestamp = %d, want %d", decoded.Timestamp, payload.Timestamp)
+	}
+	if decoded.Flags != payload.Flags {
+		t.Errorf("Flags = %d, want %d", decoded.Flags, payload.Flags)
+	}
+	if decoded.Sender != payload.Sender {
+		t.Errorf("Sender = %q, want %q", decoded.Sender, payload.Sender)
+	}
+	if decoded.Text != payload.Text {
+		t.Errorf("Text = %q, want %q", decoded.Text, payload.Text)
+	}
+}
+
+func TestGroupTextPayload_EncryptDecryptNoSender(t *testing.T) {
+	ch := NewChannelFromHashtag("nosender")
+
+	payload := &GroupTextPayload{
+		Timestamp: 12345,
+		Flags:     0,
+		Text:      "plain message",
+	}
+
+	grp, err := payload.Encrypt(ch.Hash, ch.PSK[:])
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+
+	decoded, err := grp.DecryptStruct(ch.PSK[:])
+	if err != nil {
+		t.Fatalf("DecryptStruct() error: %v", err)
+	}
+	if decoded.Sender != "" {
+		t.Errorf("Sender = %q, want empty", decoded.Sender)
+	}
+	if decoded.Text != payload.Text {
+		t.Errorf("Text = %q, want %q", decoded.Text, payload.Text)
+	}
+}
+
+func TestGroupTextPayload_DecryptWrongKey(t *testing.T) {
+	ch := NewChannelFromHashtag("correct-key")
+	wrongPSK := [16]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	payload := &GroupTextPayload{
+		Timestamp: 999,
+		Flags:     0,
+		Text:      "secret",
+	}
+
+	grp, err := payload.Encrypt(ch.Hash, ch.PSK[:])
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+
+	_, err = grp.DecryptStruct(wrongPSK[:])
+	if err == nil {
+		t.Fatal("expected error decrypting with wrong key")
+	}
+}

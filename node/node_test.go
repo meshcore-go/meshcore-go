@@ -293,3 +293,129 @@ func TestNode_AllPayloadTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestNode_NotifyACK(t *testing.T) {
+	radio := &mockRadio{}
+	n := New(seedIdentity(0x10), radio)
+	defer n.Stop()
+
+	var ackRTT time.Duration
+	var ackFired bool
+	crc := uint32(0xDEADBEEF)
+
+	n.ExpectACK(crc, 5*time.Second, func(rtt time.Duration) {
+		ackFired = true
+		ackRTT = rtt
+	}, func() {
+		t.Error("timeout should not fire")
+	})
+
+	time.Sleep(10 * time.Millisecond)
+	n.NotifyACK(crc)
+	time.Sleep(10 * time.Millisecond)
+
+	if !ackFired {
+		t.Fatal("ACK callback not fired via NotifyACK")
+	}
+	if ackRTT < 10*time.Millisecond {
+		t.Errorf("RTT = %v, expected >= 10ms", ackRTT)
+	}
+}
+
+func TestNode_NotifyACK_NoMatch(t *testing.T) {
+	radio := &mockRadio{}
+	n := New(seedIdentity(0x11), radio)
+	defer n.Stop()
+
+	timedOut := make(chan struct{}, 1)
+	n.ExpectACK(0x11111111, 100*time.Millisecond, func(time.Duration) {
+		t.Error("onACK should not fire for wrong CRC")
+	}, func() {
+		timedOut <- struct{}{}
+	})
+
+	n.NotifyACK(0x22222222) // wrong CRC
+
+	select {
+	case <-timedOut:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Error("expected timeout since NotifyACK had wrong CRC")
+	}
+}
+
+func TestNode_SendPacketDelayed(t *testing.T) {
+	radio := &mockRadio{}
+	n := New(seedIdentity(0x12), radio)
+	defer n.Stop()
+
+	pkt := &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeAck, 0),
+		PathLength: 0,
+		Payload:    []byte{0x01, 0x02, 0x03, 0x04},
+	}
+
+	err := n.SendPacketDelayed(pkt, PrioritySend, 0)
+	if err != nil {
+		t.Fatalf("SendPacketDelayed error: %v", err)
+	}
+
+	// Wait for tx engine to drain
+	time.Sleep(100 * time.Millisecond)
+
+	sent := radio.sentData()
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 sent packet, got %d", len(sent))
+	}
+}
+
+func TestNode_SendPacketDelayed_MarksSeen(t *testing.T) {
+	radio := &mockRadio{}
+	n := New(seedIdentity(0x13), radio)
+	defer n.Stop()
+
+	pkt := &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0),
+		PathLength: 0,
+		Payload:    []byte{0x10, 0x20, 0x30, 0x40, 0x50},
+	}
+
+	_ = n.SendPacketDelayed(pkt, PrioritySend, 0)
+
+	// Inject same packet from radio — should be deduped
+	data, _ := pkt.ToBytes()
+	radio.inject(data)
+	time.Sleep(100 * time.Millisecond)
+
+	var handlerCalled bool
+	n.OnPacket(meshcore.PayloadTypeGrpTxt, func(p *meshcore.Packet) {
+		handlerCalled = true
+	})
+
+	radio.inject(data)
+	time.Sleep(50 * time.Millisecond)
+
+	if handlerCalled {
+		t.Error("handler should not fire for deduped packet")
+	}
+}
+
+func TestNode_TxStats(t *testing.T) {
+	radio := &mockRadio{}
+	n := New(seedIdentity(0x14), radio)
+	defer n.Stop()
+
+	pkt := &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeAdvert, 0),
+		PathLength: 0,
+		Payload:    []byte{0x01, 0x02, 0x03, 0x04},
+	}
+	_ = n.SendPacket(pkt)
+
+	time.Sleep(100 * time.Millisecond)
+
+	stats := n.TxStats()
+	if stats.Sent < 1 {
+		t.Errorf("TxStats.Sent = %d, want >= 1", stats.Sent)
+	}
+}

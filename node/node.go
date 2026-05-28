@@ -266,6 +266,13 @@ func (n *Node) CancelACK(crc uint32) {
 	n.acks.cancel(crc)
 }
 
+// NotifyACK feeds an ACK CRC into the tracker as if it were received over
+// the air. Use this when an ACK is extracted from a PathReturn packet's
+// extra data rather than arriving as a standalone ACK packet.
+func (n *Node) NotifyACK(crc uint32) {
+	n.acks.notifyCRC(crc)
+}
+
 func (n *Node) SetChannel(idx int, ch *meshcore.ChannelEntry) bool {
 	return n.channels.set(idx, ch)
 }
@@ -344,6 +351,20 @@ func (n *Node) OnPacket(payloadType byte, h PacketHandler) {
 func (n *Node) SendPacket(pkt *meshcore.Packet) error {
 	n.router.dedup.MarkSeen(pkt)
 	return n.sendPacketRaw(pkt)
+}
+
+// SendPacketDelayed enqueues a packet with explicit priority and delay.
+// Use for ACK responses and other timing-sensitive replies.
+func (n *Node) SendPacketDelayed(pkt *meshcore.Packet, priority uint8, delay time.Duration) error {
+	n.router.dedup.MarkSeen(pkt)
+	data, err := pkt.ToBytes()
+	if err != nil {
+		return err
+	}
+	if !n.txRadio.Enqueue(data, priority, delay) {
+		return ErrTxQueueFull
+	}
+	return nil
 }
 
 func (n *Node) sendPacketRaw(pkt *meshcore.Packet) error {
