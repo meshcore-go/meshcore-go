@@ -78,7 +78,7 @@ type DeviceInfoResponse struct {
 	Model             string
 }
 
-type BatteryVoltageResponse struct {
+type BattAndStorageResponse struct {
 	BatteryMilliVolts uint16
 	UsedStorageKB     uint32
 	TotalStorageKB    uint32
@@ -316,6 +316,25 @@ type PushControlDataResp struct {
 	Payload []byte
 }
 
+type DefaultFloodScopeResponse struct {
+	Name string
+	Key  []byte
+}
+
+type PushLoginFailResponse struct {
+	PubKeyPrefix [6]byte
+}
+
+type PushContactDeletedResponse struct {
+	PublicKey [32]byte
+}
+
+func (r PushContactDeletedResponse) Identity() meshcore.Identity {
+	return meshcore.NewIdentity(r.PublicKey)
+}
+
+type PushContactsFullResponse struct{}
+
 // snrDBFromWire converts an on-wire SNR byte to real decibels. MeshCore
 // firmware encodes SNR in quarter-dB units — every companion SNR/LastSNR field
 // is sent as (int8)(getSNR()*4) or (int8)(getLastSNR()*4) (see
@@ -375,8 +394,8 @@ func ParseResponse(frameData []byte) (Response, error) {
 			return Response{}, err
 		}
 		return Response{Code: code, Data: parsed}, nil
-	case RespBatteryVoltage:
-		parsed, err := ParseBatteryVoltageResponse(payload)
+	case RespBattAndStorage:
+		parsed, err := ParseBattAndStorageResponse(payload)
 		if err != nil {
 			return Response{}, err
 		}
@@ -585,6 +604,30 @@ func ParseResponse(frameData []byte) (Response, error) {
 			return Response{}, err
 		}
 		return Response{Code: code, Data: parsed}, nil
+	case RespDefaultFloodScope:
+		parsed, err := ParseDefaultFloodScopeResponse(payload)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Code: code, Data: parsed}, nil
+	case PushLoginFail:
+		parsed, err := ParsePushLoginFailResponse(payload)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Code: code, Data: parsed}, nil
+	case PushContactDeleted:
+		parsed, err := ParsePushContactDeletedResponse(payload)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Code: code, Data: parsed}, nil
+	case PushContactsFull:
+		parsed, err := ParsePushContactsFullResponse(payload)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Code: code, Data: parsed}, nil
 	default:
 		raw := make([]byte, len(payload))
 		copy(raw, payload)
@@ -719,12 +762,12 @@ func ParseDeviceInfoResponse(data []byte) (DeviceInfoResponse, error) {
 	return resp, nil
 }
 
-func ParseBatteryVoltageResponse(data []byte) (BatteryVoltageResponse, error) {
+func ParseBattAndStorageResponse(data []byte) (BattAndStorageResponse, error) {
 	if len(data) < 2 {
-		return BatteryVoltageResponse{}, fmt.Errorf("battery voltage payload too short: got %d, need at least 2", len(data))
+		return BattAndStorageResponse{}, fmt.Errorf("batt and storage payload too short: got %d, need at least 2", len(data))
 	}
 
-	resp := BatteryVoltageResponse{
+	resp := BattAndStorageResponse{
 		BatteryMilliVolts: binary.LittleEndian.Uint16(data[:2]),
 	}
 
@@ -1220,6 +1263,46 @@ func ParsePushControlDataResp(data []byte) (PushControlDataResp, error) {
 	}
 	copy(resp.Payload, data[3:])
 	return resp, nil
+}
+
+func ParseDefaultFloodScopeResponse(data []byte) (DefaultFloodScopeResponse, error) {
+	if len(data) == 0 {
+		return DefaultFloodScopeResponse{}, nil
+	}
+	if len(data) < 31+16 {
+		return DefaultFloodScopeResponse{}, fmt.Errorf("default flood scope payload too short: got %d, need 0 or %d", len(data), 31+16)
+	}
+
+	resp := DefaultFloodScopeResponse{
+		Name: readCString(data[:31]),
+		Key:  make([]byte, 16),
+	}
+	copy(resp.Key, data[31:31+16])
+	return resp, nil
+}
+
+func ParsePushLoginFailResponse(data []byte) (PushLoginFailResponse, error) {
+	if len(data) < 7 {
+		return PushLoginFailResponse{}, fmt.Errorf("push login fail payload too short: got %d, need at least 7", len(data))
+	}
+
+	var resp PushLoginFailResponse
+	copy(resp.PubKeyPrefix[:], data[1:7])
+	return resp, nil
+}
+
+func ParsePushContactDeletedResponse(data []byte) (PushContactDeletedResponse, error) {
+	if len(data) < 32 {
+		return PushContactDeletedResponse{}, fmt.Errorf("push contact deleted payload too short: got %d, need at least 32", len(data))
+	}
+
+	var resp PushContactDeletedResponse
+	copy(resp.PublicKey[:], data[:32])
+	return resp, nil
+}
+
+func ParsePushContactsFullResponse(_ []byte) (PushContactsFullResponse, error) {
+	return PushContactsFullResponse{}, nil
 }
 
 func readCString(data []byte) string {

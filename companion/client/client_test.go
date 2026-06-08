@@ -503,21 +503,21 @@ func TestSendChannelTextMessage(t *testing.T) {
 	}
 }
 
-func TestGetBatteryVoltage(t *testing.T) {
+func TestGetBattAndStorage(t *testing.T) {
 	mt := &mockTransport{}
 	c := New(mt)
 
 	mt.onSend = func(_ []byte) {
 		go mt.fireResponse(companion.Response{
-			Code: companion.RespBatteryVoltage,
-			Data: companion.BatteryVoltageResponse{BatteryMilliVolts: 4200, UsedStorageKB: 100, TotalStorageKB: 1000},
+			Code: companion.RespBattAndStorage,
+			Data: companion.BattAndStorageResponse{BatteryMilliVolts: 4200, UsedStorageKB: 100, TotalStorageKB: 1000},
 		})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	batt, err := c.GetBatteryVoltage(ctx)
+	batt, err := c.GetBattAndStorage(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestDeviceError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err := c.GetBatteryVoltage(ctx)
+	_, err := c.GetBattAndStorage(ctx)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1633,8 +1633,8 @@ func TestSetTxPower(t *testing.T) {
 	}
 
 	mt.mu.Lock()
-	if mt.sent[0][0] != companion.CmdSetTxPower {
-		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetTxPower)
+	if mt.sent[0][0] != companion.CmdSetRadioTxPower {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetRadioTxPower)
 	}
 	mt.mu.Unlock()
 }
@@ -1993,8 +1993,141 @@ func TestSetFloodScope(t *testing.T) {
 	}
 
 	mt.mu.Lock()
-	if mt.sent[0][0] != companion.CmdSetFloodScope {
-		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetFloodScope)
+	if mt.sent[0][0] != companion.CmdSetFloodScopeKey {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetFloodScopeKey)
+	}
+	mt.mu.Unlock()
+}
+
+func TestSetFloodScopeUnscoped(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.SetFloodScopeUnscoped(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mt.mu.Lock()
+	if mt.sent[0][0] != companion.CmdSetFloodScopeKey {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetFloodScopeKey)
+	}
+	if mt.sent[0][1] != 1 {
+		t.Errorf("unscoped flag = %d, want 1", mt.sent[0][1])
+	}
+	mt.mu.Unlock()
+}
+
+func TestSetDefaultFloodScope(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	key := make([]byte, 16)
+	key[0] = 0xAA
+	if err := c.SetDefaultFloodScope(ctx, "scope", key); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mt.mu.Lock()
+	if mt.sent[0][0] != companion.CmdSetDefaultFloodScope {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetDefaultFloodScope)
+	}
+	mt.mu.Unlock()
+}
+
+func TestClearDefaultFloodScope(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.ClearDefaultFloodScope(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mt.mu.Lock()
+	if mt.sent[0][0] != companion.CmdSetDefaultFloodScope {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSetDefaultFloodScope)
+	}
+	if len(mt.sent[0]) != 1 {
+		t.Errorf("clear payload length = %d, want 1", len(mt.sent[0]))
+	}
+	mt.mu.Unlock()
+}
+
+func TestGetDefaultFloodScope(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+
+	key := make([]byte, 16)
+	key[0] = 0xBB
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{
+			Code: companion.RespDefaultFloodScope,
+			Data: companion.DefaultFloodScopeResponse{Name: "scope", Key: key},
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	scope, err := c.GetDefaultFloodScope(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if scope.Name != "scope" {
+		t.Errorf("Name = %q, want %q", scope.Name, "scope")
+	}
+	if scope.Key[0] != 0xBB {
+		t.Errorf("Key[0] = 0x%02x, want 0xBB", scope.Key[0])
+	}
+
+	mt.mu.Lock()
+	if mt.sent[0][0] != companion.CmdGetDefaultFloodScope {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdGetDefaultFloodScope)
+	}
+	mt.mu.Unlock()
+}
+
+func TestSendRawPacket(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.SendRawPacket(ctx, 2, []byte{0xDE, 0xAD, 0xBE, 0xEF}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mt.mu.Lock()
+	if mt.sent[0][0] != companion.CmdSendRawPacket {
+		t.Errorf("command code = 0x%02x, want 0x%02x", mt.sent[0][0], companion.CmdSendRawPacket)
+	}
+	if mt.sent[0][1] != 2 {
+		t.Errorf("priority = %d, want 2", mt.sent[0][1])
 	}
 	mt.mu.Unlock()
 }

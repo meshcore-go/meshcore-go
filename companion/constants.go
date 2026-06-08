@@ -1,6 +1,12 @@
 package companion
 
-const SupportedProtocolVersion = 1
+// SupportedProtocolVersion is the protocol version this library advertises to
+// the firmware via CMD_DEVICE_QUERY (app_target_ver). Firmware 1.16 gates only
+// one response-format behavior on it: app_target_ver >= 3 selects the V3
+// contact/channel message-receive frames (RESP_*_MSG_RECV_V3, which prepend SNR
+// + 2 reserved bytes). There are no higher app-version gates, so 3 unlocks every
+// 1.16 response format this library parses.
+const SupportedProtocolVersion = 3
 
 // Serial frame types.
 const (
@@ -28,7 +34,7 @@ const (
 	CmdAddUpdateContact     = 9
 	CmdSyncNextMessage      = 10
 	CmdSetRadioParams       = 11
-	CmdSetTxPower           = 12
+	CmdSetRadioTxPower      = 12
 	CmdResetPath            = 13
 	CmdSetAdvertLatLon      = 14
 	CmdRemoveContact        = 15
@@ -36,7 +42,7 @@ const (
 	CmdExportContact        = 17
 	CmdImportContact        = 18
 	CmdReboot               = 19
-	CmdGetBatteryVoltage    = 20
+	CmdGetBattAndStorage    = 20
 	CmdSetTuningParams      = 21
 	CmdDeviceQuery          = 22
 	CmdExportPrivateKey     = 23
@@ -63,7 +69,7 @@ const (
 	CmdSendBinaryReq        = 50
 	CmdFactoryReset         = 51
 	CmdSendPathDiscoveryReq = 52
-	CmdSetFloodScope        = 54
+	CmdSetFloodScopeKey     = 54
 	CmdSendControlData      = 55
 	CmdGetStats             = 56
 	CmdSendAnonReq          = 57
@@ -72,6 +78,9 @@ const (
 	CmdGetAllowedRepeatFreq = 60
 	CmdSetPathHashMode      = 61
 	CmdSendChannelData      = 62
+	CmdSetDefaultFloodScope = 63
+	CmdGetDefaultFloodScope = 64
+	CmdSendRawPacket        = 65
 )
 
 // Response codes.
@@ -88,7 +97,7 @@ const (
 	RespCurrTime          = 9
 	RespNoMoreMessages    = 10
 	RespExportContact     = 11
-	RespBatteryVoltage    = 12
+	RespBattAndStorage    = 12
 	RespDeviceInfo        = 13
 	RespPrivateKey        = 14
 	RespDisabled          = 15
@@ -104,6 +113,7 @@ const (
 	RespAutoAddConfig     = 25
 	RespAllowedRepeatFreq = 26
 	RespChannelDataRecv   = 27
+	RespDefaultFloodScope = 28
 )
 
 // Push codes (asynchronous firmware notifications, codes >= 0x80).
@@ -114,6 +124,7 @@ const (
 	PushMsgWaiting            byte = 0x83
 	PushRawData               byte = 0x84
 	PushLoginSuccess          byte = 0x85
+	PushLoginFail             byte = 0x86
 	PushStatusResponse        byte = 0x87
 	PushLogRxData             byte = 0x88
 	PushTraceData             byte = 0x89
@@ -122,6 +133,8 @@ const (
 	PushBinaryResponse        byte = 0x8C
 	PushPathDiscoveryResponse byte = 0x8D
 	PushControlData           byte = 0x8E
+	PushContactDeleted        byte = 0x8F
+	PushContactsFull          byte = 0x90
 )
 
 const (
@@ -150,6 +163,6 @@ const (
 
 // Frame size limits.
 const (
-	MaxFrameSize    = 172
-	FrameHeaderSize = 3 // type(1) + length(2)
+	MaxFrameSize    = 176 // firmware BaseSerialInterface.h MAX_FRAME_SIZE = 176 ("+4 for transport codes / region scoping")
+	FrameHeaderSize = 3   // type(1) + length(2)
 )

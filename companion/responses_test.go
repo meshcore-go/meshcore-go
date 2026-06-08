@@ -87,6 +87,21 @@ func TestParseResponse(t *testing.T) {
 	var pushLoginPrefix [6]byte
 	copy(pushLoginPrefix[:], []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
 
+	var pushLoginFailPrefix [6]byte
+	copy(pushLoginFailPrefix[:], []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+
+	var pushContactDeletedKey [32]byte
+	for i := range 32 {
+		pushContactDeletedKey[i] = byte(0x70 + i)
+	}
+
+	defaultFloodScopePayload := make([]byte, 0, 31+16)
+	floodScopeName := make([]byte, 31)
+	copy(floodScopeName, []byte("region1"))
+	defaultFloodScopePayload = append(defaultFloodScopePayload, floodScopeName...)
+	floodScopeKey := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	defaultFloodScopePayload = append(defaultFloodScopePayload, floodScopeKey...)
+
 	var pushStatusPrefix [6]byte
 	copy(pushStatusPrefix[:], []byte{0x21, 0x22, 0x23, 0x24, 0x25, 0x26})
 
@@ -231,6 +246,11 @@ func TestParseResponse(t *testing.T) {
 		{name: "push binary resp", frameData: hexBytes(t, "8c00ddccbbaafeed"), wantCode: PushBinaryResponse, wantData: PushBinaryResp{Tag: 0xaabbccdd, ResponseData: []byte{0xfe, 0xed}}},
 		{name: "push path discovery resp", frameData: hexBytes(t, "8d0011223344556602aabb03010203"), wantCode: PushPathDiscoveryResponse, wantData: PushPathDiscoveryResp{PubKeyPrefix: pushPathDiscoveryPrefix, OutPathLen: 0x02, OutPath: []byte{0xaa, 0xbb}, InPathLen: 0x03, InPath: []byte{0x01, 0x02, 0x03}}},
 		{name: "push control data", frameData: hexBytes(t, "8ef9d602deadbeef"), wantCode: PushControlData, wantData: PushControlDataResp{SNR: -1.75, RSSI: int8(-42), PathLen: 0x02, Payload: []byte{0xde, 0xad, 0xbe, 0xef}}}, // -7/4 dB
+		{name: "default flood scope null", frameData: []byte{RespDefaultFloodScope}, wantCode: RespDefaultFloodScope, wantData: DefaultFloodScopeResponse{}},
+		{name: "default flood scope named", frameData: append([]byte{RespDefaultFloodScope}, defaultFloodScopePayload...), wantCode: RespDefaultFloodScope, wantData: DefaultFloodScopeResponse{Name: "region1", Key: floodScopeKey}},
+		{name: "push login fail", frameData: hexBytes(t, "8600aabbccddeeff"), wantCode: PushLoginFail, wantData: PushLoginFailResponse{PubKeyPrefix: pushLoginFailPrefix}},
+		{name: "push contact deleted", frameData: append([]byte{PushContactDeleted}, pushContactDeletedKey[:]...), wantCode: PushContactDeleted, wantData: PushContactDeletedResponse{PublicKey: pushContactDeletedKey}},
+		{name: "push contacts full", frameData: []byte{PushContactsFull}, wantCode: PushContactsFull, wantData: PushContactsFullResponse{}},
 		{name: "no more messages", frameData: hexBytes(t, "0a"), wantCode: RespNoMoreMessages, wantData: NoMoreMessagesResponse{}},
 		{name: "sent no ack", frameData: hexBytes(t, "06"), wantCode: RespSent, wantData: SentResponse{HasAckCode: false}},
 		{name: "sent with ack", frameData: hexBytes(t, "0605000000"), wantCode: RespSent, wantData: SentResponse{AckCode: 5, HasAckCode: true}},
@@ -286,8 +306,8 @@ func TestParseResponse(t *testing.T) {
 				Text:            "ok",
 			},
 		},
-		{name: "battery voltage only", frameData: hexBytes(t, "0ce803"), wantCode: RespBatteryVoltage, wantData: BatteryVoltageResponse{BatteryMilliVolts: 1000}},
-		{name: "battery full", frameData: hexBytes(t, "0ce8030010000000200000"), wantCode: RespBatteryVoltage, wantData: BatteryVoltageResponse{BatteryMilliVolts: 1000, UsedStorageKB: 4096, TotalStorageKB: 8192}},
+		{name: "battery voltage only", frameData: hexBytes(t, "0ce803"), wantCode: RespBattAndStorage, wantData: BattAndStorageResponse{BatteryMilliVolts: 1000}},
+		{name: "battery full", frameData: hexBytes(t, "0ce8030010000000200000"), wantCode: RespBattAndStorage, wantData: BattAndStorageResponse{BatteryMilliVolts: 1000, UsedStorageKB: 4096, TotalStorageKB: 8192}},
 		{
 			name:      "self info",
 			frameData: append([]byte{RespSelfInfo}, selfPayload...),
@@ -356,7 +376,7 @@ func TestResponseParsersErrors(t *testing.T) {
 		{name: "contacts start invalid length 2", parse: func() error { _, err := ParseContactsStartResponse([]byte{0x01, 0x02}); return err }, wantErr: true},
 		{name: "contacts start invalid length 3", parse: func() error { _, err := ParseContactsStartResponse([]byte{0x01, 0x02, 0x03}); return err }, wantErr: true},
 		{name: "curr time short", parse: func() error { _, err := ParseCurrTimeResponse([]byte{0x01, 0x02, 0x03}); return err }, wantErr: true},
-		{name: "battery short", parse: func() error { _, err := ParseBatteryVoltageResponse([]byte{0x01}); return err }, wantErr: true},
+		{name: "battery short", parse: func() error { _, err := ParseBattAndStorageResponse([]byte{0x01}); return err }, wantErr: true},
 		{name: "self info short", parse: func() error { _, err := ParseSelfInfoResponse(make([]byte, 56)); return err }, wantErr: true},
 		{name: "device info short for v3", parse: func() error { _, err := ParseDeviceInfoResponse(append([]byte{0x03}, make([]byte, 17)...)); return err }, wantErr: true},
 		{name: "device info v2 allowed", parse: func() error { _, err := ParseDeviceInfoResponse([]byte{0x02}); return err }, wantErr: false},
@@ -392,6 +412,11 @@ func TestResponseParsersErrors(t *testing.T) {
 		{name: "push binary resp short", parse: func() error { _, err := ParsePushBinaryResp(make([]byte, 4)); return err }, wantErr: true},
 		{name: "push path discovery resp short", parse: func() error { _, err := ParsePushPathDiscoveryResp(make([]byte, 8)); return err }, wantErr: true},
 		{name: "push control data short", parse: func() error { _, err := ParsePushControlDataResp(make([]byte, 2)); return err }, wantErr: true},
+		{name: "default flood scope empty allowed", parse: func() error { _, err := ParseDefaultFloodScopeResponse(nil); return err }, wantErr: false},
+		{name: "default flood scope short", parse: func() error { _, err := ParseDefaultFloodScopeResponse(make([]byte, 46)); return err }, wantErr: true},
+		{name: "push login fail short", parse: func() error { _, err := ParsePushLoginFailResponse(make([]byte, 6)); return err }, wantErr: true},
+		{name: "push contact deleted short", parse: func() error { _, err := ParsePushContactDeletedResponse(make([]byte, 31)); return err }, wantErr: true},
+		{name: "push contacts full ignores payload", parse: func() error { _, err := ParsePushContactsFullResponse([]byte{0x01, 0x02}); return err }, wantErr: false},
 	}
 
 	for _, tt := range tests {
