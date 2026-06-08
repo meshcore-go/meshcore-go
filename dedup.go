@@ -1,13 +1,11 @@
 package meshcore
 
 import (
-	"encoding/binary"
 	"sync"
 )
 
 const (
 	MaxPacketHashes = 160 // matches C++ SimpleMeshTables (128+32)
-	MaxACKEntries   = 64
 )
 
 // DedupCache is a fixed-size circular buffer that tracks recently seen packets
@@ -17,8 +15,6 @@ type DedupCache struct {
 	mu       sync.Mutex
 	hashes   [MaxPacketHashes][PacketHashSize]byte
 	hashNext int
-	acks     [MaxACKEntries]uint32
-	ackNext  int
 }
 
 // HasSeen reports whether this packet has been seen before. If not, it records
@@ -27,25 +23,7 @@ func (d *DedupCache) HasSeen(pkt *Packet) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if pkt.PayloadType() == PayloadTypeAck {
-		return d.hasSeenACK(pkt)
-	}
 	return d.hasSeenHash(pkt)
-}
-
-func (d *DedupCache) hasSeenACK(pkt *Packet) bool {
-	if len(pkt.Payload) < 4 {
-		return false
-	}
-	crc := binary.LittleEndian.Uint32(pkt.Payload[:4])
-	for i := range d.acks {
-		if d.acks[i] == crc {
-			return true
-		}
-	}
-	d.acks[d.ackNext] = crc
-	d.ackNext = (d.ackNext + 1) % MaxACKEntries
-	return false
 }
 
 func (d *DedupCache) hasSeenHash(pkt *Packet) bool {
@@ -65,16 +43,6 @@ func (d *DedupCache) hasSeenHash(pkt *Packet) bool {
 func (d *DedupCache) MarkSeen(pkt *Packet) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	if pkt.PayloadType() == PayloadTypeAck {
-		if len(pkt.Payload) < 4 {
-			return
-		}
-		crc := binary.LittleEndian.Uint32(pkt.Payload[:4])
-		d.acks[d.ackNext] = crc
-		d.ackNext = (d.ackNext + 1) % MaxACKEntries
-		return
-	}
 
 	h := pkt.PacketHash()
 	d.hashes[d.hashNext] = h
