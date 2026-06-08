@@ -113,7 +113,7 @@ type CoreStats struct {
 type RadioStats struct {
 	NoiseFloor int16
 	LastRSSI   int8
-	LastSNR    int8
+	LastSNR    float32 // Real decibels (wire: quarter-dB, ×4).
 	TxAirSecs  uint32
 	RxAirSecs  uint32
 }
@@ -172,7 +172,7 @@ type ChannelMsgRecvResponse struct {
 }
 
 type ContactMsgRecvV3Response struct {
-	SNR             int8
+	SNR             float32 // Real decibels (wire: quarter-dB, ×4).
 	PubKeyPrefix    [6]byte
 	PathLen         byte
 	TxtType         byte
@@ -181,7 +181,7 @@ type ContactMsgRecvV3Response struct {
 }
 
 type ChannelMsgRecvV3Response struct {
-	SNR             int8
+	SNR             float32 // Real decibels (wire: quarter-dB, ×4).
 	ChannelIdx      byte
 	PathLen         byte
 	TxtType         byte
@@ -208,7 +208,7 @@ type SignatureResponse struct {
 }
 
 type ChannelDataRecvResponse struct {
-	SNR        int8
+	SNR        float32 // Real decibels (wire: quarter-dB, ×4).
 	ChannelIdx int8
 	PathLen    byte
 	DataType   uint16
@@ -244,7 +244,7 @@ type PushSendConfirmedResponse struct {
 type PushMsgWaitingResponse struct{}
 
 type PushRawDataResponse struct {
-	LastSNR  int8
+	LastSNR  float32 // Real decibels (wire: quarter-dB, ×4).
 	LastRSSI int8
 	Payload  []byte
 }
@@ -259,7 +259,7 @@ type PushStatusResp struct {
 }
 
 type PushLogRxDataResponse struct {
-	LastSNR  int8
+	LastSNR  float32 // Real decibels (wire: quarter-dB, ×4).
 	LastRSSI int8
 	Raw      []byte
 }
@@ -270,8 +270,8 @@ type PushTraceDataResponse struct {
 	Tag        uint32
 	AuthCode   uint32
 	PathHashes []byte
-	PathSnrs   []byte
-	LastSNR    int8
+	PathSnrs   []byte  // Raw per-hop SNR bytes (quarter-dB). Decode with meshcore.PathSNRdB.
+	LastSNR    float32 // Real decibels (wire: quarter-dB, ×4).
 }
 
 type PushNewAdvertResponse struct {
@@ -310,11 +310,19 @@ type PushPathDiscoveryResp struct {
 }
 
 type PushControlDataResp struct {
-	SNR     int8
+	SNR     float32 // Real decibels (wire: quarter-dB, ×4).
 	RSSI    int8
 	PathLen byte
 	Payload []byte
 }
+
+// snrDBFromWire converts an on-wire SNR byte to real decibels. MeshCore
+// firmware encodes SNR in quarter-dB units — every companion SNR/LastSNR field
+// is sent as (int8)(getSNR()*4) or (int8)(getLastSNR()*4) (see
+// companion_radio/MyMesh.cpp). Dividing by 4 recovers real dB with exact
+// 0.25 dB resolution. Per-hop trace PathSnrs are left raw; decode them with
+// meshcore.PathSNRdB.
+func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
 
 func ParseResponse(frameData []byte) (Response, error) {
 	if len(frameData) == 0 {
@@ -795,7 +803,7 @@ func ParseStatsResponse(data []byte) (StatsResponse, error) {
 		resp.Radio = &RadioStats{
 			NoiseFloor: int16(binary.LittleEndian.Uint16(data[1:3])),
 			LastRSSI:   int8(data[3]),
-			LastSNR:    int8(data[4]),
+			LastSNR:    snrDBFromWire(int8(data[4])),
 			TxAirSecs:  binary.LittleEndian.Uint32(data[5:9]),
 			RxAirSecs:  binary.LittleEndian.Uint32(data[9:13]),
 		}
@@ -888,7 +896,7 @@ func ParseContactMsgRecvV3Response(data []byte) (ContactMsgRecvV3Response, error
 	}
 
 	var resp ContactMsgRecvV3Response
-	resp.SNR = int8(data[0])
+	resp.SNR = snrDBFromWire(int8(data[0]))
 	copy(resp.PubKeyPrefix[:], data[3:9])
 	resp.PathLen = data[9]
 	resp.TxtType = data[10]
@@ -903,7 +911,7 @@ func ParseChannelMsgRecvV3Response(data []byte) (ChannelMsgRecvV3Response, error
 	}
 
 	resp := ChannelMsgRecvV3Response{
-		SNR:             int8(data[0]),
+		SNR:             snrDBFromWire(int8(data[0])),
 		ChannelIdx:      data[3],
 		PathLen:         data[4],
 		TxtType:         data[5],
@@ -975,7 +983,7 @@ func ParseChannelDataRecvResponse(data []byte) (ChannelDataRecvResponse, error) 
 	}
 
 	resp := ChannelDataRecvResponse{
-		SNR:        int8(data[0]),
+		SNR:        snrDBFromWire(int8(data[0])),
 		ChannelIdx: int8(data[3]),
 		PathLen:    data[4],
 		DataType:   binary.LittleEndian.Uint16(data[5:7]),
@@ -1038,7 +1046,7 @@ func ParsePushRawDataResponse(data []byte) (PushRawDataResponse, error) {
 	}
 
 	resp := PushRawDataResponse{
-		LastSNR:  int8(data[0]),
+		LastSNR:  snrDBFromWire(int8(data[0])),
 		LastRSSI: int8(data[1]),
 		Payload:  make([]byte, len(data)-3),
 	}
@@ -1074,7 +1082,7 @@ func ParsePushLogRxDataResponse(data []byte) (PushLogRxDataResponse, error) {
 	}
 
 	resp := PushLogRxDataResponse{
-		LastSNR:  int8(data[0]),
+		LastSNR:  snrDBFromWire(int8(data[0])),
 		LastRSSI: int8(data[1]),
 		Raw:      make([]byte, len(data)-2),
 	}
@@ -1109,7 +1117,7 @@ func ParsePushTraceDataResponse(data []byte) (PushTraceDataResponse, error) {
 	resp.PathSnrs = make([]byte, pathLen)
 	copy(resp.PathSnrs, data[idx:idx+pathLen])
 	idx += pathLen
-	resp.LastSNR = int8(data[idx])
+	resp.LastSNR = snrDBFromWire(int8(data[idx]))
 
 	return resp, nil
 }
@@ -1205,7 +1213,7 @@ func ParsePushControlDataResp(data []byte) (PushControlDataResp, error) {
 	}
 
 	resp := PushControlDataResp{
-		SNR:     int8(data[0]),
+		SNR:     snrDBFromWire(int8(data[0])),
 		RSSI:    int8(data[1]),
 		PathLen: data[2],
 		Payload: make([]byte, len(data)-3),

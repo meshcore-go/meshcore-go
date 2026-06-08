@@ -11,7 +11,7 @@ import (
 type mockModem struct {
 	mu    sync.Mutex
 	sent  [][]byte
-	dataH func([]byte, int8, int8, bool)
+	dataH func([]byte, float32, int8, bool)
 }
 
 func (m *mockModem) SendData(data []byte) error {
@@ -21,8 +21,8 @@ func (m *mockModem) SendData(data []byte) error {
 	return nil
 }
 
-func (m *mockModem) SetDataHandler(h func([]byte, int8, int8, bool)) { m.dataH = h }
-func (m *mockModem) AddOutboundHandler(h func([]byte))               {}
+func (m *mockModem) SetDataHandler(h func([]byte, float32, int8, bool)) { m.dataH = h }
+func (m *mockModem) AddOutboundHandler(h func([]byte))                  {}
 
 func (m *mockModem) inject(data []byte) {
 	if m.dataH != nil {
@@ -30,7 +30,7 @@ func (m *mockModem) inject(data []byte) {
 	}
 }
 
-func (m *mockModem) injectWithSignal(data []byte, snr int8, rssi int8) {
+func (m *mockModem) injectWithSignal(data []byte, snr float32, rssi int8) {
 	if m.dataH != nil {
 		m.dataH(data, snr, rssi, true)
 	}
@@ -257,7 +257,7 @@ func TestMux_SignalMetadataPropagated(t *testing.T) {
 		t.Fatal("expected packet")
 	}
 	if got.SNR != -12 {
-		t.Errorf("SNR = %d, want -12", got.SNR)
+		t.Errorf("SNR = %g, want -12", got.SNR)
 	}
 	if got.RSSI != -90 {
 		t.Errorf("RSSI = %d, want -90", got.RSSI)
@@ -272,8 +272,9 @@ func TestMux_RawDataHandlerReceivesBytes(t *testing.T) {
 	radio := mux.NewRadio()
 
 	var rawData []byte
-	var rawSNR, rawRSSI int8
-	radio.SetRawDataHandler(func(data []byte, snr int8, rssi int8, _ bool) {
+	var rawSNR float32
+	var rawRSSI int8
+	radio.SetRawDataHandler(func(data []byte, snr float32, rssi int8, _ bool) {
 		rawData = append([]byte{}, data...)
 		rawSNR = snr
 		rawRSSI = rssi
@@ -286,7 +287,7 @@ func TestMux_RawDataHandlerReceivesBytes(t *testing.T) {
 		t.Fatal("raw handler should receive data")
 	}
 	if rawSNR != -5 {
-		t.Errorf("raw SNR = %d, want -5", rawSNR)
+		t.Errorf("raw SNR = %g, want -5", rawSNR)
 	}
 	if rawRSSI != -80 {
 		t.Errorf("raw RSSI = %d, want -80", rawRSSI)
@@ -303,7 +304,7 @@ func TestMux_BothHandlersCalledTogether(t *testing.T) {
 	var gotPkt bool
 	var gotRaw bool
 	radio.SetDataHandler(func(_ *meshcore.Packet) { gotPkt = true })
-	radio.SetRawDataHandler(func(_ []byte, _ int8, _ int8, _ bool) { gotRaw = true })
+	radio.SetRawDataHandler(func(_ []byte, _ float32, _ int8, _ bool) { gotRaw = true })
 
 	modem.inject(muxFloodPacket(meshcore.PayloadTypeAdvert, []byte{0x01}))
 

@@ -61,7 +61,7 @@ func TestPeerTable_UpdateAndLookup(t *testing.T) {
 		t.Errorf("Type = %q, want %q", p.Type, "CHAT")
 	}
 	if p.SNR != -5 {
-		t.Errorf("SNR = %d, want -5", p.SNR)
+		t.Errorf("SNR = %g, want -5", p.SNR)
 	}
 	if p.RSSI != -80 {
 		t.Errorf("RSSI = %d, want -80", p.RSSI)
@@ -89,7 +89,7 @@ func TestPeerTable_UpdateExisting(t *testing.T) {
 		t.Errorf("LastAdvertTimestamp = %d, want 200", p.LastAdvertTimestamp)
 	}
 	if p.SNR != -3 {
-		t.Errorf("SNR = %d, want -3", p.SNR)
+		t.Errorf("SNR = %g, want -3", p.SNR)
 	}
 }
 

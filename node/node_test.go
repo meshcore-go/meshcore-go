@@ -13,7 +13,7 @@ type mockRadio struct {
 	mu       sync.Mutex
 	sent     [][]byte
 	dataH    func(*meshcore.Packet)
-	rawDataH func([]byte, int8, int8, bool)
+	rawDataH func([]byte, float32, int8, bool)
 }
 
 func (m *mockRadio) SendData(data []byte) error {
@@ -23,10 +23,10 @@ func (m *mockRadio) SendData(data []byte) error {
 	return nil
 }
 
-func (m *mockRadio) SetDataHandler(h func(*meshcore.Packet))                { m.dataH = h }
-func (m *mockRadio) SetRawDataHandler(h func([]byte, int8, int8, bool))     { m.rawDataH = h }
-func (m *mockRadio) AddOutboundHandler(h func([]byte))                      {}
-func (m *mockRadio) Close() error                                           { return nil }
+func (m *mockRadio) SetDataHandler(h func(*meshcore.Packet))               { m.dataH = h }
+func (m *mockRadio) SetRawDataHandler(h func([]byte, float32, int8, bool)) { m.rawDataH = h }
+func (m *mockRadio) AddOutboundHandler(h func([]byte))                     {}
+func (m *mockRadio) Close() error                                          { return nil }
 
 func (m *mockRadio) inject(data []byte) {
 	pkt, err := meshcore.PacketFromBytes(data)
@@ -44,7 +44,7 @@ func (m *mockRadio) inject(data []byte) {
 	}
 }
 
-func (m *mockRadio) injectWithSignal(data []byte, snr int8, rssi int8) {
+func (m *mockRadio) injectWithSignal(data []byte, snr float32, rssi int8) {
 	pkt, err := meshcore.PacketFromBytes(data)
 	if err != nil {
 		if m.rawDataH != nil {
@@ -250,7 +250,7 @@ func TestNode_SignalMetadataOnPacket(t *testing.T) {
 		t.Fatal("expected packet")
 	}
 	if got.SNR != -7 {
-		t.Errorf("SNR = %d, want -7", got.SNR)
+		t.Errorf("SNR = %g, want -7", got.SNR)
 	}
 	if got.RSSI != -85 {
 		t.Errorf("RSSI = %d, want -85", got.RSSI)

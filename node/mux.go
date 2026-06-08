@@ -11,7 +11,7 @@ import (
 
 type Modem interface {
 	SendData(data []byte) error
-	SetDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool))
+	SetDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool))
 	AddOutboundHandler(h func([]byte))
 }
 
@@ -28,7 +28,7 @@ type virtualRadio struct {
 	mux       *RadioMux
 	filter    PacketFilter
 	dataH     func(*meshcore.Packet)
-	rawDataH  func([]byte, int8, int8, bool)
+	rawDataH  func([]byte, float32, int8, bool)
 	outboundH []func([]byte)
 	mu        sync.RWMutex
 }
@@ -66,7 +66,7 @@ func (v *virtualRadio) SetDataHandler(h func(*meshcore.Packet)) {
 	v.mu.Unlock()
 }
 
-func (v *virtualRadio) SetRawDataHandler(h func([]byte, int8, int8, bool)) {
+func (v *virtualRadio) SetRawDataHandler(h func([]byte, float32, int8, bool)) {
 	v.mu.Lock()
 	v.rawDataH = h
 	v.mu.Unlock()
@@ -93,7 +93,7 @@ func (v *virtualRadio) wants(pkt *meshcore.Packet) bool {
 	return f(pkt)
 }
 
-func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr int8, rssi int8, hasSignalInfo bool) {
+func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr float32, rssi int8, hasSignalInfo bool) {
 	v.mu.RLock()
 	h := v.dataH
 	rh := v.rawDataH
@@ -241,7 +241,7 @@ func (m *RadioMux) remove(v *virtualRadio) {
 	m.mu.Unlock()
 }
 
-func (m *RadioMux) onData(data []byte, snr int8, rssi int8, hasSignalInfo bool) {
+func (m *RadioMux) onData(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
 	pkt, err := meshcore.PacketFromBytes(data)
 	if err != nil {
 		m.log.Debug("failed to parse packet", "error", err, "data_len", len(data), "hex", hex.EncodeToString(data))

@@ -60,11 +60,11 @@ func TestCompanionModem_ReceivePush(t *testing.T) {
 
 	var mu sync.Mutex
 	var gotData []byte
-	var gotSNR int8
+	var gotSNR float32
 	var gotRSSI int8
 	var gotHasSignalInfo bool
 
-	m.SetDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool) {
+	m.SetDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
 		mu.Lock()
 		gotData = data
 		gotSNR = snr
@@ -93,7 +93,7 @@ func TestCompanionModem_ReceivePush(t *testing.T) {
 		t.Errorf("data = %x, want aabbcc", gotData)
 	}
 	if gotSNR != -5 {
-		t.Errorf("SNR = %d, want -5", gotSNR)
+		t.Errorf("SNR = %g, want -5", gotSNR)
 	}
 	if gotRSSI != -42 {
 		t.Errorf("RSSI = %d, want -42", gotRSSI)

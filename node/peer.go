@@ -24,7 +24,7 @@ type Peer struct {
 	OutPathHashSize     uint8  // Bytes per hop hash (1, 2, or 4). 0 means default (1).
 	LastAdvertTimestamp uint32 // Timestamp from the peer's clock (replay protection).
 	LastSeen            time.Time
-	SNR                 int8
+	SNR                 float32 // Real decibels (converted from wire quarter-dB at ingest).
 	RSSI                int8
 	HasSignalInfo       bool
 }
@@ -53,7 +53,7 @@ func NewPeerTable(maxPeers int) *PeerTable {
 // (and makes no changes) if the advert's timestamp is not newer than the
 // stored timestamp for that peer (replay protection). The caller must verify
 // the advert signature before calling Update.
-func (pt *PeerTable) Update(adv *meshcore.Advert, snr, rssi int8, hasSignalInfo bool, pathHashes []byte) bool {
+func (pt *PeerTable) Update(adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) bool {
 	key := adv.PublicKey.PublicKey()
 
 	pt.mu.Lock()
@@ -100,7 +100,7 @@ func (pt *PeerTable) Insert(p *Peer) {
 	pt.peers[key] = &cp
 }
 
-func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr, rssi int8, hasSignalInfo bool, pathHashes []byte) {
+func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) {
 	appData := adv.AppData()
 	p.Name = appData.Name
 	p.Type = appData.Type

@@ -39,7 +39,7 @@ type FrameHandler = func(*KissFrame)
 // HwFrameHandler is called when a hardware sub-command frame is received.
 type HwFrameHandler = func(subCmd byte, data []byte)
 
-type DataFrameHandler = func(data []byte, snr int8, rssi int8, hasSignalInfo bool)
+type DataFrameHandler = func(data []byte, snr float32, rssi int8, hasSignalInfo bool)
 
 // ModemOption configures a KissModem.
 type ModemOption func(*KissModem)
@@ -497,7 +497,7 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 		m.pendingMu.Unlock()
 
 		if pending != nil && len(frame.Data) >= 3 {
-			pending.SNR = int8(frame.Data[1])
+			pending.SNR = snrDBFromWire(int8(frame.Data[1]))
 			pending.RSSI = int8(frame.Data[2])
 			pending.HasSignalInfo = true
 			m.enqueueFrame(pending)

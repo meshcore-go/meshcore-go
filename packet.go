@@ -15,13 +15,27 @@ type Packet struct {
 	TransportCode1 uint16 // Little Endian
 	TransportCode2 uint16 // Little Endian
 
-	SNR           int8
+	SNR           float32 // Real decibels. See snrDBFromWire for the wire format.
 	RSSI          int8
 	HasSignalInfo bool
 
 	pathHashSize  uint8
 	pathHashCount uint8
 }
+
+// snrDBFromWire converts an on-wire SNR byte to real decibels.
+//
+// MeshCore firmware encodes SNR in quarter-dB units: it sends
+// (int8)round(snr_dB * 4) (see MeshCore Packet.h getSNR()/_snr,
+// Dispatcher.cpp _snr = getLastSNR()*4, and the companion/KISS frame
+// builders). Dividing by 4 recovers real dB with exact 0.25 dB resolution.
+func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
+
+// PathSNRdB decodes a single per-hop SNR byte from a trace Path (or a
+// companion PushTraceDataResponse.PathSnrs slice) into real decibels. These
+// path bytes are kept in their raw on-wire quarter-dB form; use this helper
+// to convert them. See snrDBFromWire for the wire format.
+func PathSNRdB(b byte) float32 { return snrDBFromWire(int8(b)) }
 
 func MakeHeader(routeType, payloadType, payloadVer byte) byte {
 	return (payloadVer << 6) | (payloadType << 2) | routeType

@@ -114,13 +114,14 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 	}
 
 	// Inject RX_META — should enrich and dispatch the queued frame.
+	// SNR byte -6 is quarter-dB on the wire, decoded to -1.5 dB.
 	mt.injectFrame(makeRxMetaFrame(-6, -80))
 	modem.Flush()
 	if len(received) != 1 {
 		t.Fatalf("expected 1 dispatched frame after meta, got %d", len(received))
 	}
-	if received[0].SNR != -6 {
-		t.Errorf("SNR = %d, want -6", received[0].SNR)
+	if received[0].SNR != -1.5 {
+		t.Errorf("SNR = %g, want -1.5", received[0].SNR)
 	}
 	if received[0].RSSI != -80 {
 		t.Errorf("RSSI = %d, want -80", received[0].RSSI)
@@ -163,7 +164,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 	stale := received[0]
 	mu.Unlock()
 	if stale.SNR != 0 || stale.RSSI != 0 {
-		t.Errorf("stale frame should have zero SNR/RSSI, got SNR=%d RSSI=%d", stale.SNR, stale.RSSI)
+		t.Errorf("stale frame should have zero SNR/RSSI, got SNR=%g RSSI=%d", stale.SNR, stale.RSSI)
 	}
 	if stale.HasSignalInfo {
 		t.Error("expected HasSignalInfo=false for stale-flushed frame")
@@ -172,7 +173,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 		t.Errorf("stale frame data = %X, want 01", stale.Data)
 	}
 
-	// Now deliver meta for the second frame.
+	// Now deliver meta for the second frame. SNR byte 5 (quarter-dB) = 1.25 dB.
 	mt.injectFrame(makeRxMetaFrame(5, -50))
 	modem.Flush()
 
@@ -186,8 +187,8 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 	mu.Lock()
 	enriched := received[1]
 	mu.Unlock()
-	if enriched.SNR != 5 || enriched.RSSI != -50 {
-		t.Errorf("enriched frame SNR=%d RSSI=%d, want 5/-50", enriched.SNR, enriched.RSSI)
+	if enriched.SNR != 1.25 || enriched.RSSI != -50 {
+		t.Errorf("enriched frame SNR=%g RSSI=%d, want 1.25/-50", enriched.SNR, enriched.RSSI)
 	}
 	if !enriched.HasSignalInfo {
 		t.Error("expected HasSignalInfo=true for enriched frame")
@@ -234,7 +235,7 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 	flushed := received[0]
 	mu.Unlock()
 	if flushed.SNR != 0 || flushed.RSSI != 0 {
-		t.Errorf("timeout-flushed frame should have zero SNR/RSSI, got SNR=%d RSSI=%d", flushed.SNR, flushed.RSSI)
+		t.Errorf("timeout-flushed frame should have zero SNR/RSSI, got SNR=%g RSSI=%d", flushed.SNR, flushed.RSSI)
 	}
 	if flushed.HasSignalInfo {
 		t.Error("expected HasSignalInfo=false for timeout-flushed frame")
@@ -374,7 +375,7 @@ func TestModem_DataHandler(t *testing.T) {
 	modem := NewKissModem(mt) // signal report disabled
 
 	var dataReceived [][]byte
-	modem.SetDataHandler(func(data []byte, _ int8, _ int8, _ bool) {
+	modem.SetDataHandler(func(data []byte, _ float32, _ int8, _ bool) {
 		dataReceived = append(dataReceived, data)
 	})
 
@@ -462,7 +463,7 @@ func TestModem_SignalReportEnabled_MetaShortPayload(t *testing.T) {
 		if f.Command == KISS_CMD_DATA {
 			dataFrames++
 			if f.SNR != 0 || f.RSSI != 0 {
-				t.Errorf("short meta should not enrich, got SNR=%d RSSI=%d", f.SNR, f.RSSI)
+				t.Errorf("short meta should not enrich, got SNR=%g RSSI=%d", f.SNR, f.RSSI)
 			}
 		}
 	}
@@ -541,7 +542,7 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	mt.injectFrame(makeDataFrame([]byte{0x03}))
-	mt.injectFrame(makeRxMetaFrame(10, -40))
+	mt.injectFrame(makeRxMetaFrame(10, -40)) // SNR byte 10 (quarter-dB) = 2.5 dB
 	modem.Flush()
 
 	mu.Lock()
@@ -554,12 +555,12 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 	// First two: stale, zero SNR/RSSI
 	for i := range 2 {
 		if received[i].SNR != 0 || received[i].RSSI != 0 {
-			t.Errorf("frame %d: expected zero SNR/RSSI, got %d/%d", i, received[i].SNR, received[i].RSSI)
+			t.Errorf("frame %d: expected zero SNR/RSSI, got %g/%d", i, received[i].SNR, received[i].RSSI)
 		}
 	}
 	// Third: enriched
-	if received[2].SNR != 10 || received[2].RSSI != -40 {
-		t.Errorf("frame 2: expected SNR=10 RSSI=-40, got %d/%d", received[2].SNR, received[2].RSSI)
+	if received[2].SNR != 2.5 || received[2].RSSI != -40 {
+		t.Errorf("frame 2: expected SNR=2.5 RSSI=-40, got %g/%d", received[2].SNR, received[2].RSSI)
 	}
 }
 
@@ -611,7 +612,7 @@ func TestModem_HandlerWorkers(t *testing.T) {
 
 	var mu sync.Mutex
 	var received []*KissFrame
-	modem.SetDataHandler(func(data []byte, snr int8, rssi int8, hasSignalInfo bool) {
+	modem.SetDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
 		mu.Lock()
 		received = append(received, &KissFrame{Data: data, SNR: snr, RSSI: rssi})
 		mu.Unlock()

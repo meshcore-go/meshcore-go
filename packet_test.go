@@ -586,3 +586,26 @@ func TestPacketValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestSNRFromWire verifies the quarter-dB wire decode used at every SNR ingest
+// point. MeshCore firmware sends (int8)round(snr_dB * 4); dividing by 4 recovers
+// real dB. See snrDBFromWire / PathSNRdB.
+func TestSNRFromWire(t *testing.T) {
+	cases := []struct {
+		wire int8
+		want float32
+	}{
+		{49, 12.25}, // observed close-repeater value
+		{40, 10.0},
+		{-20, -5.0},
+		{0, 0.0},
+	}
+	for _, c := range cases {
+		if got := snrDBFromWire(c.wire); got != c.want {
+			t.Errorf("snrDBFromWire(%d) = %g, want %g", c.wire, got, c.want)
+		}
+		if got := PathSNRdB(byte(c.wire)); got != c.want {
+			t.Errorf("PathSNRdB(%d) = %g, want %g", byte(c.wire), got, c.want)
+		}
+	}
+}
