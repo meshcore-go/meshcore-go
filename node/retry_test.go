@@ -397,3 +397,41 @@ func TestNode_SendTextMessage_DirectEscalatesToFlood(t *testing.T) {
 		t.Error("expected at least one flood retry after direct retries exhausted")
 	}
 }
+
+// Each retransmission must be a distinct packet so 1.16 packet-hash dedup
+// forwards it rather than dropping it as a duplicate. The node recomposes the
+// plaintext per attempt (attempt encoded into the flags byte), so every send
+// has a unique payload and therefore a unique packet hash.
+func TestNode_SendTextMessage_RetriesAreUnique(t *testing.T) {
+	radio := &mockRadio{}
+	sender := seedIdentity(0xF6)
+	peer := seedIdentity(0xF7)
+	n := New(sender, radio)
+	defer n.Stop()
+
+	err := n.SendTextMessage(peer.Identity, []byte("retry me"), 0, time.Now(), nil, 1, 100*time.Millisecond, nil)
+	if err != nil {
+		t.Fatalf("SendTextMessage error: %v", err)
+	}
+
+	// Let the flood retries (3) exhaust.
+	time.Sleep(3 * time.Second)
+
+	sent := radio.sentData()
+	if len(sent) < 2 {
+		t.Fatalf("expected multiple sends, got %d", len(sent))
+	}
+
+	hashes := map[[meshcore.PacketHashSize]byte]int{}
+	for i, raw := range sent {
+		pkt, err := meshcore.PacketFromBytes(raw)
+		if err != nil {
+			t.Fatalf("parsing sent[%d]: %v", i, err)
+		}
+		h := pkt.PacketHash()
+		if prev, dup := hashes[h]; dup {
+			t.Errorf("send %d has the same packet hash as send %d (retries not unique)", i, prev)
+		}
+		hashes[h] = i
+	}
+}
