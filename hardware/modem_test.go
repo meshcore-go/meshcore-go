@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -719,5 +720,73 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 	stats := modem.Stats()
 	if stats.RxMetaMisattributed != 1 {
 		t.Errorf("expected RxMetaMisattributed=1, got %d", stats.RxMetaMisattributed)
+	}
+}
+
+// sendAndAwait runs SendData (which blocks under TX flow control) in a
+// goroutine, waits until the modem has marked the TX pending, then delivers the
+// given hardware response frame and returns SendData's result.
+func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resp *KissFrame) error {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() { errCh <- m.SendData([]byte{0x01}) }()
+
+	deadline := time.Now().Add(time.Second)
+	for !m.txPending.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("SendData never marked TX pending")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mt.injectFrame(resp)
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendData did not return after TX response")
+		return nil
+	}
+}
+
+// TX_DONE with result byte 0x01 = success → SendData returns nil.
+func TestModem_TxFlowControl_DoneSuccess(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
+	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_TX_DONE, 0x01}}
+	if err := sendAndAwait(t, m, mt, frame); err != nil {
+		t.Errorf("SendData on TX_DONE success = %v, want nil", err)
+	}
+}
+
+// TX_DONE with result byte 0x00 = failure (radio busy / startSendRaw failed /
+// airtime timeout, firmware 1.16+) → SendData returns ErrTxFailed.
+func TestModem_TxFlowControl_DoneFailure(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
+	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_TX_DONE, 0x00}}
+	if err := sendAndAwait(t, m, mt, frame); !errors.Is(err, ErrTxFailed) {
+		t.Errorf("SendData on TX_DONE failure = %v, want ErrTxFailed", err)
+	}
+}
+
+// 1.16 baseline: a TX_DONE with no result byte is not a guaranteed success, so
+// it is treated as a failed transmit (no pre-1.16 "missing byte = success").
+func TestModem_TxFlowControl_DoneMissingByte(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
+	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_TX_DONE}}
+	if err := sendAndAwait(t, m, mt, frame); !errors.Is(err, ErrTxFailed) {
+		t.Errorf("SendData on TX_DONE without result byte = %v, want ErrTxFailed", err)
+	}
+}
+
+// HW_RESP_ERROR carrying HW_ERR_TX_BUSY → SendData returns ErrTxBusy.
+func TestModem_TxFlowControl_Busy(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
+	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_ERROR, HW_ERR_TX_BUSY}}
+	if err := sendAndAwait(t, m, mt, frame); !errors.Is(err, ErrTxBusy) {
+		t.Errorf("SendData on HW_ERR_TX_BUSY = %v, want ErrTxBusy", err)
 	}
 }

@@ -73,8 +73,10 @@ func WithLogger(l *slog.Logger) ModemOption {
 // WithTxFlowControl configures TX flow control. Enabled by default with a
 // 5-second timeout. After each SendData call, the modem waits for
 // HW_RESP_TX_DONE from the hardware before returning. If the response does
-// not arrive within the given timeout, SendData returns ErrTxTimeout.
-// Pass 0 to disable flow control entirely.
+// not arrive within the given timeout, SendData returns ErrTxTimeout. If the
+// hardware reports the transmit failed (a TX_DONE result byte other than 0x01,
+// or an HW_ERR_TX_BUSY error frame), SendData returns ErrTxFailed or ErrTxBusy
+// respectively. Pass 0 to disable flow control entirely.
 func WithTxFlowControl(timeout time.Duration) ModemOption {
 	return func(m *KissModem) {
 		if timeout == 0 {
@@ -657,8 +659,16 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 	}
 
 	if subCmd == HW_RESP_TX_DONE && m.txResult != nil && m.txPending.Load() {
+		// TX_DONE carries a result byte: 0x01 = sent, 0x00 = failed (radio busy /
+		// startSendRaw failed / airtime timeout). See firmware KissModem.cpp
+		// processTx(). We target MeshCore 1.16+ as the KISS baseline, where this
+		// byte is always present, so anything other than 0x01 is a failed transmit.
+		res := error(nil)
+		if len(data) < 1 || data[0] != 0x01 {
+			res = ErrTxFailed
+		}
 		select {
-		case m.txResult <- nil:
+		case m.txResult <- res:
 		default:
 		}
 	}
