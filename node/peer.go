@@ -35,6 +35,9 @@ type PeerTable struct {
 	mu       sync.RWMutex
 	peers    map[[meshcore.PubKeySize]byte]*Peer
 	maxPeers int
+
+	// learnedPathsOnly: adverts don't set OutPath; only SetOutPath does.
+	learnedPathsOnly bool
 }
 
 // NewPeerTable creates a PeerTable with the given maximum capacity.
@@ -113,7 +116,7 @@ func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi i
 	p.SNR = snr
 	p.RSSI = rssi
 	p.HasSignalInfo = hasSignalInfo
-	if len(pathHashes) > 0 {
+	if !pt.learnedPathsOnly && len(pathHashes) > 0 {
 		out := make([]byte, len(pathHashes))
 		copy(out, pathHashes)
 		p.OutPath = out

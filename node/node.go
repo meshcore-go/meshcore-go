@@ -40,6 +40,8 @@ type Node struct {
 	advertData     *meshcore.AdvertAppData
 	advertInterval time.Duration
 
+	learnedPathsOnly bool
+
 	cbMu         sync.RWMutex
 	errH         func(error)
 	allowForward func(*meshcore.Packet) bool
@@ -88,6 +90,15 @@ func WithAllowPacketHandler(f func(*meshcore.Packet) bool) Option {
 func WithMaxPeers(max int) Option {
 	return func(n *Node) {
 		n.peers = NewPeerTable(max)
+	}
+}
+
+// WithLearnedPathsOnly stops adverts from setting OutPath, so sends flood until a
+// path is learned via the peer table's SetOutPath. Order-independent with respect
+// to the other options.
+func WithLearnedPathsOnly() Option {
+	return func(n *Node) {
+		n.learnedPathsOnly = true
 	}
 }
 
@@ -175,6 +186,9 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	for _, opt := range opts {
 		opt(n)
 	}
+	// Applied after options so it survives WithMaxPeers replacing the table,
+	// regardless of option order.
+	n.peers.learnedPathsOnly = n.learnedPathsOnly
 	if n.log == nil {
 		n.log = slog.Default()
 	}
@@ -441,49 +455,63 @@ func (n *Node) SendTextMessage(
 	timeout time.Duration,
 	onResult func(DMSendResult),
 ) error {
+	if pathHashSize == 0 {
+		pathHashSize = 1 // 0 is invalid: it would divide-by-zero below and corrupt PathLength
+	}
+
 	self := n.getIdentity()
 	secret, err := n.secrets.get(peer)
 	if err != nil {
 		return err
 	}
 
-	plaintext := meshcore.BuildTextPlaintext(timestamp, flags, text)
-	ackCRC := meshcore.CalcAckHash(plaintext, self.PublicKeyBytes())
-
-	msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
-	if err != nil {
-		return err
-	}
-	msgBytes, err := msg.ToBytes()
-	if err != nil {
-		return err
-	}
-
 	isDirect := len(path) > 0
-	var routeType byte
-	if isDirect {
-		routeType = meshcore.RouteTypeDirect
-	} else {
-		routeType = meshcore.RouteTypeFlood
+
+	// compose builds the TXT_MSG packet for a given attempt. The attempt is
+	// encoded into the flags byte (matching firmware composeMsgPacket) so every
+	// (re)transmission has a unique packet hash and survives 1.16 packet-hash
+	// dedup. The flags byte feeds the ACK hash, so the expected ACK CRC is
+	// recomputed per attempt and returned. useDirect routes over the known path;
+	// otherwise the packet floods.
+	compose := func(attempt int, useDirect bool) (*meshcore.Packet, uint32, error) {
+		plaintext := meshcore.BuildTextPlaintextWithAttempt(timestamp, flags, text, attempt)
+		ackCRC := meshcore.CalcAckHash(plaintext, self.PublicKeyBytes())
+
+		msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
+		if err != nil {
+			return nil, 0, err
+		}
+		msgBytes, err := msg.ToBytes()
+		if err != nil {
+			return nil, 0, err
+		}
+
+		pkt := &meshcore.Packet{
+			PathLength: (pathHashSize - 1) << 6,
+			Payload:    msgBytes,
+		}
+		if useDirect {
+			pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeTxtMsg, 0)
+			pkt.Path = path
+			pkt.PathLength |= uint8(len(path) / int(pathHashSize))
+		} else {
+			pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeTxtMsg, 0)
+			pkt.Path = []byte{}
+		}
+		return pkt, ackCRC, nil
 	}
 
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeTxtMsg, 0),
-		PathLength: (pathHashSize - 1) << 6,
-		Path:       path,
-		Payload:    msgBytes,
+	// Initial transmission is attempt 0.
+	pkt, ackCRC, err := compose(0, isDirect)
+	if err != nil {
+		return err
 	}
-	if isDirect {
-		pkt.PathLength |= uint8(len(path) / int(pathHashSize))
-	}
-
 	if err := n.sendPacketRaw(pkt); err != nil {
 		return err
 	}
 	n.router.dedup.MarkSeen(pkt)
 
-	var maxRetries int
-	var directRetries int
+	var maxRetries, directRetries int
 	if isDirect {
 		maxRetries = 5
 		directRetries = 3
@@ -510,14 +538,12 @@ func (n *Node) SendTextMessage(
 					return
 				}
 
-				retryPkt, retryCRC, err := n.composeTextRetry(self, peer, secret, timestamp, flags, text, attempt, directRetries, path, pathHashSize)
-				if err != nil {
-					if onResult != nil {
-						onResult(DMSendResult{Confirmed: false})
-					}
-					return
+				retryPkt, retryCRC, err := compose(attempt, attempt <= directRetries)
+				if err == nil {
+					err = n.sendPacketRaw(retryPkt)
 				}
-				if err := n.sendPacketRaw(retryPkt); err != nil {
+				if err != nil {
+					n.log.Warn("text message retry failed", "attempt", attempt, "error", err)
 					if onResult != nil {
 						onResult(DMSendResult{Confirmed: false})
 					}
@@ -531,51 +557,6 @@ func (n *Node) SendTextMessage(
 	registerACK(ackCRC)
 
 	return nil
-}
-
-// composeTextRetry rebuilds the TXT_MSG packet for a retransmission attempt.
-// Unlike a plain resend, it re-derives the plaintext with the attempt encoded
-// into the flags byte (matching firmware composeMsgPacket), so each retry has a
-// unique packet hash and is not dropped by 1.16 packet-hash dedup. Because the
-// flags byte feeds the ACK hash, the expected ACK CRC is recomputed and
-// returned. Attempts within directRetries stay on the known path; later ones
-// escalate to flood.
-func (n *Node) composeTextRetry(
-	self meshcore.LocalIdentity,
-	peer meshcore.Identity,
-	secret []byte,
-	timestamp time.Time,
-	flags byte,
-	text []byte,
-	attempt, directRetries int,
-	path []byte,
-	pathHashSize uint8,
-) (*meshcore.Packet, uint32, error) {
-	plaintext := meshcore.BuildTextPlaintextWithAttempt(timestamp, flags, text, attempt)
-	ackCRC := meshcore.CalcAckHash(plaintext, self.PublicKeyBytes())
-
-	msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
-	if err != nil {
-		return nil, 0, err
-	}
-	msgBytes, err := msg.ToBytes()
-	if err != nil {
-		return nil, 0, err
-	}
-
-	pkt := &meshcore.Packet{
-		PathLength: (pathHashSize - 1) << 6,
-		Payload:    msgBytes,
-	}
-	if attempt <= directRetries {
-		pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeTxtMsg, 0)
-		pkt.Path = path
-		pkt.PathLength |= uint8(len(path) / int(pathHashSize))
-	} else {
-		pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeTxtMsg, 0)
-		pkt.Path = []byte{}
-	}
-	return pkt, ackCRC, nil
 }
 
 func (n *Node) TxQueueLen() int {

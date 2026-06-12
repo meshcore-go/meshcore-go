@@ -18,3 +18,26 @@
 go.work
 
 cmd/
+
+# ── Claude Code / agent skills ──────────────────────────────────────
+# Commit shared team config (.claude/settings.json, .claude/commands/, .claude/agents/);
+# ignore only the personal, machine-local, and regenerable bits below.
+.claude/settings.local.json
+.claude/projects/
+.claude/todos/
+.claude/shell-snapshots/
+.claude/statsig/
+# Materialized skill caches — regenerated from the committed skills-lock.json
+.claude/skills/
+.agents/
+# Local-only notes auto-loaded by Claude, not for sharing
+CLAUDE.local.md
+
+# Playwright MCP artifacts
+.playwright-mcp
+
+# ── OS / editor ─────────────────────────────────────────────────────
+.DS_Store
+*~
+*.swp
+*.swo

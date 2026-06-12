@@ -391,3 +391,54 @@ func TestPeerTable_Insert_WithOutPathHashSize(t *testing.T) {
 		t.Errorf("OutPath = %x, want [01 02]", got.OutPath)
 	}
 }
+
+func TestPeerTable_LearnedPathsOnly(t *testing.T) {
+	id := peerIdentity(0x20)
+	pathHashes := []byte{0xAA, 0xBB}
+
+	// Default mode: an advert's reverse path populates OutPath.
+	def := NewPeerTable(10)
+	def.Update(makeSignedAdvert(id, 100, "x"), 0, 0, false, pathHashes)
+	if p := def.Lookup(id.PublicKey()); p == nil || len(p.OutPath) == 0 {
+		t.Error("default mode: expected OutPath to be set from the advert path")
+	}
+
+	// learnedPathsOnly: the advert path is ignored.
+	lp := NewPeerTable(10)
+	lp.learnedPathsOnly = true
+	lp.Update(makeSignedAdvert(id, 100, "x"), 0, 0, false, pathHashes)
+	p := lp.Lookup(id.PublicKey())
+	if p == nil {
+		t.Fatal("peer not inserted")
+	}
+	if len(p.OutPath) != 0 {
+		t.Errorf("learnedPathsOnly: OutPath = %x, want empty (advert path must be ignored)", p.OutPath)
+	}
+
+	// SetOutPath still applies an explicitly learned path.
+	if !lp.SetOutPath(id.PublicKey(), pathHashes) {
+		t.Fatal("SetOutPath returned false")
+	}
+	if p := lp.Lookup(id.PublicKey()); len(p.OutPath) == 0 {
+		t.Error("learnedPathsOnly: SetOutPath should still set OutPath")
+	}
+}
+
+// The fix: WithLearnedPathsOnly must survive WithMaxPeers replacing the peer
+// table, regardless of the order the options are passed.
+func TestNode_LearnedPathsOnly_OrderIndependent(t *testing.T) {
+	id := peerIdentity(0x21)
+	orders := map[string][]Option{
+		"flag before maxpeers": {WithLearnedPathsOnly(), WithMaxPeers(8)},
+		"flag after maxpeers":  {WithMaxPeers(8), WithLearnedPathsOnly()},
+	}
+	for name, opts := range orders {
+		t.Run(name, func(t *testing.T) {
+			n := New(id, &mockRadio{}, opts...)
+			defer n.Stop()
+			if !n.peers.learnedPathsOnly {
+				t.Error("learnedPathsOnly was lost; option order should not matter")
+			}
+		})
+	}
+}
