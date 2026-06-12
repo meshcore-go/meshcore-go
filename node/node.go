@@ -356,6 +356,19 @@ func (n *Node) canAcceptPacket(pkt *meshcore.Packet) bool {
 	return f != nil && f(pkt)
 }
 
+// OnPacket registers a handler for received packets of the given payload type
+// (meshcore.PayloadType*). Multiple handlers may be registered per type; they
+// run in registration order. Handlers run on the dispatch goroutine, so they
+// must not block.
+//
+// Deduplication is by packet hash only (matching the firmware): byte-identical
+// duplicates are dropped before dispatch, but retransmissions are NOT. A sender
+// (this library included) varies the attempt number in each text-message
+// retransmission so relays forward it, which gives every retry a distinct
+// packet hash. As a result, when a delivery succeeds but its ACK is lost, a
+// PayloadTypeTxtMsg handler can be invoked more than once for the same logical
+// message — exactly as on MeshCore firmware. Handlers that must suppress these
+// should dedup at the message level, e.g. by (sender key prefix, timestamp).
 func (n *Node) OnPacket(payloadType byte, h PacketHandler) {
 	n.handlerMu.Lock()
 	n.handlers[payloadType] = append(n.handlers[payloadType], h)

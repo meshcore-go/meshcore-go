@@ -603,6 +603,18 @@ func TestCommandsToBytes(t *testing.T) {
 			wantHex: "3f" + strings.Repeat("41", 30) + "00" + "101112131415161718191a1b1c1d1e1f",
 		},
 		{
+			name: "set default flood scope multibyte name truncated on rune boundary",
+			build: func() []byte {
+				// "A" + 15×"€" = 1 + 45 = 46 bytes; the 30-byte cut lands mid-"€".
+				return SetDefaultFloodScopeCommand{
+					Name: "A" + strings.Repeat("€", 15),
+					Key:  []byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f},
+				}.ToBytes()
+			},
+			// Truncates to "A"+9×"€" = 28 bytes (no split rune), zero-padded to 31, then key.
+			wantHex: "3f" + "41" + strings.Repeat("e282ac", 9) + "000000" + "202122232425262728292a2b2c2d2e2f",
+		},
+		{
 			name: "set default flood scope clear empty name",
 			build: func() []byte {
 				return SetDefaultFloodScopeCommand{}.ToBytes()

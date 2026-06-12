@@ -1,6 +1,9 @@
 package companion
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"unicode/utf8"
+)
 
 type AppStartCommand struct {
 	AppVersion byte
@@ -624,6 +627,15 @@ func (c SetDefaultFloodScopeCommand) ToBytes() []byte {
 	nameBytes := []byte(c.Name)
 	if len(nameBytes) > 30 {
 		nameBytes = nameBytes[:30]
+		// Drop a trailing rune split by the 30-byte cut so we never emit a
+		// partial UTF-8 sequence (firmware reads the name with strlen, leaving
+		// 1 byte for the null terminator in the 31-byte field).
+		for len(nameBytes) > 0 {
+			if r, size := utf8.DecodeLastRune(nameBytes); r != utf8.RuneError || size > 1 {
+				break
+			}
+			nameBytes = nameBytes[:len(nameBytes)-1]
+		}
 	}
 	copy(buf[1:32], nameBytes)
 
