@@ -31,7 +31,7 @@ func TestFrameEncode(t *testing.T) {
 			name:      "maximum payload size",
 			frameType: FrameTypeOutgoing,
 			dataHex:   strings.Repeat("aa", MaxFrameSize),
-			wantHex:   "3cac00" + strings.Repeat("aa", MaxFrameSize),
+			wantHex:   "3cb000" + strings.Repeat("aa", MaxFrameSize),
 		},
 		{
 			name:      "oversized payload",

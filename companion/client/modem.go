@@ -25,7 +25,7 @@ type CompanionModem struct {
 	cancel context.CancelFunc
 
 	mu    sync.Mutex
-	dataH func(data []byte, snr int8, rssi int8)
+	dataH func(data []byte, snr float32, rssi int8, hasSignalInfo bool)
 
 	outboundMu sync.RWMutex
 	outboundH  []func([]byte)
@@ -66,7 +66,7 @@ func (m *CompanionModem) SendData(data []byte) error {
 // SetDataHandler registers the callback invoked for each incoming raw
 // mesh packet. The handler receives the packet bytes, SNR, and RSSI
 // exactly as reported by the firmware.
-func (m *CompanionModem) SetDataHandler(h func(data []byte, snr int8, rssi int8)) {
+func (m *CompanionModem) SetDataHandler(h func(data []byte, snr float32, rssi int8, hasSignalInfo bool)) {
 	m.mu.Lock()
 	m.dataH = h
 	m.mu.Unlock()
@@ -87,7 +87,7 @@ func (m *CompanionModem) onRawData(resp companion.Response) {
 	h := m.dataH
 	m.mu.Unlock()
 	if h != nil {
-		h(raw.Payload, raw.LastSNR, raw.LastRSSI)
+		h(raw.Payload, raw.LastSNR, raw.LastRSSI, true)
 	}
 }
 
@@ -100,6 +100,6 @@ func (m *CompanionModem) onLogRxData(resp companion.Response) {
 	h := m.dataH
 	m.mu.Unlock()
 	if h != nil {
-		h(rx.Raw, rx.LastSNR, rx.LastRSSI)
+		h(rx.Raw, rx.LastSNR, rx.LastRSSI, true)
 	}
 }

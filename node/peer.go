@@ -21,10 +21,12 @@ type Peer struct {
 	Feat1               uint16
 	Feat2               uint16
 	OutPath             []byte // Stored path hashes for direct routing.
+	OutPathHashSize     uint8  // Bytes per hop hash (1, 2, or 4). 0 means default (1).
 	LastAdvertTimestamp uint32 // Timestamp from the peer's clock (replay protection).
 	LastSeen            time.Time
-	SNR                 int8
+	SNR                 float32 // Real decibels (converted from wire quarter-dB at ingest).
 	RSSI                int8
+	HasSignalInfo       bool
 }
 
 // PeerTable is a thread-safe table of known peers, keyed by public key.
@@ -33,6 +35,9 @@ type PeerTable struct {
 	mu       sync.RWMutex
 	peers    map[[meshcore.PubKeySize]byte]*Peer
 	maxPeers int
+
+	// learnedPathsOnly: adverts don't set OutPath; only SetOutPath does.
+	learnedPathsOnly bool
 }
 
 // NewPeerTable creates a PeerTable with the given maximum capacity.
@@ -51,7 +56,7 @@ func NewPeerTable(maxPeers int) *PeerTable {
 // (and makes no changes) if the advert's timestamp is not newer than the
 // stored timestamp for that peer (replay protection). The caller must verify
 // the advert signature before calling Update.
-func (pt *PeerTable) Update(adv *meshcore.Advert, snr, rssi int8, pathHashes []byte) bool {
+func (pt *PeerTable) Update(adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) bool {
 	key := adv.PublicKey.PublicKey()
 
 	pt.mu.Lock()
@@ -61,7 +66,7 @@ func (pt *PeerTable) Update(adv *meshcore.Advert, snr, rssi int8, pathHashes []b
 		if adv.Timestamp <= existing.LastAdvertTimestamp {
 			return false
 		}
-		pt.fillPeer(existing, adv, snr, rssi, pathHashes)
+		pt.fillPeer(existing, adv, snr, rssi, hasSignalInfo, pathHashes)
 		return true
 	}
 
@@ -70,12 +75,35 @@ func (pt *PeerTable) Update(adv *meshcore.Advert, snr, rssi int8, pathHashes []b
 	}
 
 	p := &Peer{Identity: adv.PublicKey}
-	pt.fillPeer(p, adv, snr, rssi, pathHashes)
+	pt.fillPeer(p, adv, snr, rssi, hasSignalInfo, pathHashes)
 	pt.peers[key] = p
 	return true
 }
 
-func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr, rssi int8, pathHashes []byte) {
+// Insert adds a peer directly, bypassing advert verification and replay
+// protection. Intended for hydrating the table from persistent storage on
+// boot. If the table is full, the least-recently-seen peer is evicted.
+func (pt *PeerTable) Insert(p *Peer) {
+	key := p.Identity.PublicKey()
+
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	if _, ok := pt.peers[key]; ok {
+		cp := *p
+		pt.peers[key] = &cp
+		return
+	}
+
+	if len(pt.peers) >= pt.maxPeers {
+		pt.evictOldestLocked()
+	}
+
+	cp := *p
+	pt.peers[key] = &cp
+}
+
+func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) {
 	appData := adv.AppData()
 	p.Name = appData.Name
 	p.Type = appData.Type
@@ -87,7 +115,8 @@ func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr, rssi int8, pat
 	p.LastSeen = time.Now()
 	p.SNR = snr
 	p.RSSI = rssi
-	if len(pathHashes) > 0 {
+	p.HasSignalInfo = hasSignalInfo
+	if !pt.learnedPathsOnly && len(pathHashes) > 0 {
 		out := make([]byte, len(pathHashes))
 		copy(out, pathHashes)
 		p.OutPath = out
@@ -166,6 +195,39 @@ func (pt *PeerTable) Peers() []Peer {
 		result = append(result, *p)
 	}
 	return result
+}
+
+// SetOutPath sets the outbound path for a peer. Returns false if peer not found.
+// A nil path clears the path (unknown). A non-nil zero-length slice marks the
+// peer as a direct neighbor (0 hops, no routing needed).
+// hashSize is the bytes-per-hop (1, 2, or 4); pass 0 to leave unchanged.
+func (pt *PeerTable) SetOutPath(pubKey [meshcore.PubKeySize]byte, path []byte, hashSize ...uint8) bool {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	p, ok := pt.peers[pubKey]
+	if !ok {
+		return false
+	}
+	if path == nil {
+		p.OutPath = nil
+		p.OutPathHashSize = 0
+	} else if len(path) == 0 {
+		p.OutPath = []byte{}
+	} else {
+		out := make([]byte, len(path))
+		copy(out, path)
+		p.OutPath = out
+	}
+	if len(hashSize) > 0 && hashSize[0] > 0 {
+		p.OutPathHashSize = hashSize[0]
+	}
+	return true
+}
+
+// ResetOutPath clears the outbound path for a peer. Returns false if peer not found.
+func (pt *PeerTable) ResetOutPath(pubKey [meshcore.PubKeySize]byte) bool {
+	return pt.SetOutPath(pubKey, nil)
 }
 
 // Count returns the number of peers in the table.

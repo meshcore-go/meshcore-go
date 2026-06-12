@@ -39,7 +39,7 @@ type FrameHandler = func(*KissFrame)
 // HwFrameHandler is called when a hardware sub-command frame is received.
 type HwFrameHandler = func(subCmd byte, data []byte)
 
-type DataFrameHandler = func(data []byte, snr int8, rssi int8)
+type DataFrameHandler = func(data []byte, snr float32, rssi int8, hasSignalInfo bool)
 
 // ModemOption configures a KissModem.
 type ModemOption func(*KissModem)
@@ -73,8 +73,10 @@ func WithLogger(l *slog.Logger) ModemOption {
 // WithTxFlowControl configures TX flow control. Enabled by default with a
 // 5-second timeout. After each SendData call, the modem waits for
 // HW_RESP_TX_DONE from the hardware before returning. If the response does
-// not arrive within the given timeout, SendData returns ErrTxTimeout.
-// Pass 0 to disable flow control entirely.
+// not arrive within the given timeout, SendData returns ErrTxTimeout. If the
+// hardware reports the transmit failed (a TX_DONE result byte other than 0x01,
+// or an HW_ERR_TX_BUSY error frame), SendData returns ErrTxFailed or ErrTxBusy
+// respectively. Pass 0 to disable flow control entirely.
 func WithTxFlowControl(timeout time.Duration) ModemOption {
 	return func(m *KissModem) {
 		if timeout == 0 {
@@ -97,6 +99,42 @@ func WithTxAirtimeEstimator(estimator func(packetLen int) uint32) ModemOption {
 	}
 }
 
+// WithHandlerWorkers enables a bounded worker pool for user handler
+// invocation. When n > 0, dispatched frames are forwarded to a job channel
+// of capacity n and consumed by n worker goroutines, isolating slow user
+// handlers from the inbound drain loop. When 0 (default), handlers run
+// inline on the drain goroutine.
+func WithHandlerWorkers(n int) ModemOption {
+	return func(m *KissModem) {
+		if n < 0 {
+			n = 0
+		}
+		m.handlerWorkers = n
+	}
+}
+
+// WithHandlerWatchdog enables per-dispatch latency tracking. When a single
+// dispatchFrame call exceeds the threshold, the modem emits a warning and
+// increments ModemStats.HandlerSlow. Zero (default) disables the watchdog.
+func WithHandlerWatchdog(threshold time.Duration) ModemOption {
+	return func(m *KissModem) {
+		if threshold < 0 {
+			threshold = 0
+		}
+		m.handlerWatchdog = threshold
+	}
+}
+
+// ModemStats holds runtime counters reported by Stats.
+type ModemStats struct {
+	InboundDroppedOldest uint64
+	InboundDroppedNew    uint64
+	RxMetaTimeouts       uint64
+	RxMetaMisattributed  uint64
+	HandlerSlow          uint64
+	HwDecodeErrors       uint64
+}
+
 // KissModem represents a KISS TNC modem connection.
 type KissModem struct {
 	transport    Transport
@@ -113,7 +151,23 @@ type KissModem struct {
 	inbound chan *KissFrame
 	flush   chan chan struct{}
 	done    chan struct{}
+	closed  atomic.Bool
 	drainWg sync.WaitGroup
+
+	// handlerWorkers > 0 enables a bounded worker pool for user handler
+	// invocation. When zero, handlers run inline on the drain goroutine.
+	handlerWorkers  int
+	handlerJobs     chan *KissFrame
+	handlerWg       sync.WaitGroup
+	handlerWatchdog time.Duration
+
+	// stat counters (atomic)
+	statDropOldest    atomic.Uint64
+	statDropNew       atomic.Uint64
+	statMetaTimeout   atomic.Uint64
+	statMetaMisattrib atomic.Uint64
+	statSlowHandler   atomic.Uint64
+	statHwDecodeErr   atomic.Uint64
 
 	errMu sync.RWMutex
 	errH  func(error)
@@ -130,6 +184,7 @@ type KissModem struct {
 	pendingMu    sync.Mutex
 	pendingFrame *KissFrame
 	pendingTimer *time.Timer
+	pendingSeq   uint64
 
 	outboundMu sync.RWMutex
 	outboundH  []func([]byte)
@@ -156,6 +211,13 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	if m.txFlowControl {
 		m.txResult = make(chan error, 1)
 	}
+	if m.handlerWorkers > 0 {
+		m.handlerJobs = make(chan *KissFrame, m.handlerWorkers)
+		for i := 0; i < m.handlerWorkers; i++ {
+			m.handlerWg.Add(1)
+			go m.handlerWorker()
+		}
+	}
 	m.drainWg.Add(1)
 	go m.drainInbound()
 	t.SetFrameHandler(m.onFrame)
@@ -163,31 +225,53 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	return m
 }
 
+// Stats returns a snapshot of modem runtime counters.
+func (m *KissModem) Stats() ModemStats {
+	return ModemStats{
+		InboundDroppedOldest: m.statDropOldest.Load(),
+		InboundDroppedNew:    m.statDropNew.Load(),
+		RxMetaTimeouts:       m.statMetaTimeout.Load(),
+		RxMetaMisattributed:  m.statMetaMisattrib.Load(),
+		HandlerSlow:          m.statSlowHandler.Load(),
+		HwDecodeErrors:       m.statHwDecodeErr.Load(),
+	}
+}
+
 func (m *KissModem) drainInbound() {
 	defer m.drainWg.Done()
 	for {
 		select {
-		case frame, ok := <-m.inbound:
-			if !ok {
-				return
-			}
+		case <-m.done:
+			return
+		case frame := <-m.inbound:
 			m.dispatchFrame(frame)
 		case done := <-m.flush:
 			// Drain any remaining buffered frames before signalling.
+		drainLoop:
 			for {
 				select {
-				case frame, ok := <-m.inbound:
-					if !ok {
-						close(done)
-						return
-					}
+				case frame := <-m.inbound:
 					m.dispatchFrame(frame)
 				default:
-					close(done)
-					goto cont
+					break drainLoop
 				}
 			}
-		cont:
+			close(done)
+		}
+	}
+}
+
+func (m *KissModem) handlerWorker() {
+	defer m.handlerWg.Done()
+	for {
+		select {
+		case <-m.done:
+			return
+		case frame, ok := <-m.handlerJobs:
+			if !ok {
+				return
+			}
+			m.invokeHandlers(frame)
 		}
 	}
 }
@@ -208,6 +292,9 @@ func (m *KissModem) Connect(ctx context.Context) error {
 
 // Close shuts down the transport connection.
 func (m *KissModem) Close() error {
+	if !m.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	m.pendingMu.Lock()
 	if m.pendingTimer != nil {
 		m.pendingTimer.Stop()
@@ -216,8 +303,10 @@ func (m *KissModem) Close() error {
 	m.pendingFrame = nil
 	m.pendingMu.Unlock()
 	close(m.done)
-	close(m.inbound)
 	m.drainWg.Wait()
+	if m.handlerWorkers > 0 {
+		m.handlerWg.Wait()
+	}
 	return m.transport.Close()
 }
 
@@ -410,11 +499,19 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 		m.pendingMu.Unlock()
 
 		if pending != nil && len(frame.Data) >= 3 {
-			pending.SNR = int8(frame.Data[1])
+			pending.SNR = snrDBFromWire(int8(frame.Data[1]))
 			pending.RSSI = int8(frame.Data[2])
+			pending.HasSignalInfo = true
 			m.enqueueFrame(pending)
 		} else if pending != nil {
+			// Meta frame with truncated payload; dispatch without meta.
 			m.enqueueFrame(pending)
+		} else {
+			// Meta arrived with no pending data frame — almost always means
+			// a prior data frame was already flushed (timeout or replaced).
+			// Drop the orphaned meta to prevent it being misattributed to
+			// the next data frame.
+			m.statMetaMisattrib.Add(1)
 		}
 
 		// Still dispatch the HW frame to registered hw handlers.
@@ -432,10 +529,13 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 				m.pendingTimer = nil
 			}
 			m.pendingFrame = nil
+			m.statMetaMisattrib.Add(1)
 		}
+		m.pendingSeq++
+		seq := m.pendingSeq
 		m.pendingFrame = frame
 		m.pendingTimer = time.AfterFunc(rxMetaTimeout, func() {
-			m.flushPending()
+			m.flushPending(seq)
 		})
 		m.pendingMu.Unlock()
 
@@ -451,21 +551,27 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 }
 
 // flushPending dispatches the pending data frame without metadata (timeout).
-func (m *KissModem) flushPending() {
+// seq guards against the timer firing after the pending slot has already
+// been replaced or consumed by a later data frame / meta arrival.
+func (m *KissModem) flushPending(seq uint64) {
 	m.pendingMu.Lock()
-	pending := m.pendingFrame
-	if pending != nil {
-		m.pendingFrame = nil
-		m.pendingTimer = nil
+	if m.pendingSeq != seq || m.pendingFrame == nil {
+		m.pendingMu.Unlock()
+		return
 	}
+	pending := m.pendingFrame
+	m.pendingFrame = nil
+	m.pendingTimer = nil
 	m.pendingMu.Unlock()
 
-	if pending != nil {
-		m.enqueueFrame(pending)
-	}
+	m.statMetaTimeout.Add(1)
+	m.enqueueFrame(pending)
 }
 
 func (m *KissModem) enqueueFrame(frame *KissFrame) {
+	if m.closed.Load() {
+		return
+	}
 	select {
 	case m.inbound <- frame:
 	case <-m.done:
@@ -477,10 +583,12 @@ func (m *KissModem) enqueueFrame(frame *KissFrame) {
 		}
 		select {
 		case m.inbound <- frame:
-			m.log.Warn("inbound buffer full, dropped oldest frame")
+			m.statDropOldest.Add(1)
+			m.log.Warn("inbound buffer full, dropped oldest frame", "dropped_total", m.statDropOldest.Load())
 		case <-m.done:
 		default:
-			m.log.Warn("inbound buffer full, dropped new frame")
+			m.statDropNew.Add(1)
+			m.log.Warn("inbound buffer full, dropped new frame", "dropped_total", m.statDropNew.Load())
 		}
 	}
 }
@@ -497,6 +605,30 @@ func (m *KissModem) Flush() {
 }
 
 func (m *KissModem) dispatchFrame(frame *KissFrame) {
+	if m.handlerWorkers > 0 {
+		select {
+		case m.handlerJobs <- frame:
+		case <-m.done:
+		}
+		return
+	}
+	m.invokeHandlers(frame)
+}
+
+func (m *KissModem) invokeHandlers(frame *KissFrame) {
+	if m.handlerWatchdog > 0 {
+		start := time.Now()
+		defer func() {
+			if elapsed := time.Since(start); elapsed > m.handlerWatchdog {
+				m.statSlowHandler.Add(1)
+				m.log.Warn("kiss handler exceeded watchdog",
+					"elapsed", elapsed,
+					"threshold", m.handlerWatchdog,
+					"command", frame.Command)
+			}
+		}()
+	}
+
 	m.frameMu.RLock()
 	fh := m.frameH
 	m.frameMu.RUnlock()
@@ -510,7 +642,7 @@ func (m *KissModem) dispatchFrame(frame *KissFrame) {
 		dh := m.dataH
 		m.dataMu.RUnlock()
 		if dh != nil {
-			dh(frame.Data, frame.SNR, frame.RSSI)
+			dh(frame.Data, frame.SNR, frame.RSSI, frame.HasSignalInfo)
 		}
 	case KISS_CMD_SETHARDWARE:
 		m.dispatchHwFrame(frame)
@@ -520,14 +652,23 @@ func (m *KissModem) dispatchFrame(frame *KissFrame) {
 func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 	subCmd, data, err := DecodeHardwareFrame(frame)
 	if err != nil {
+		m.statHwDecodeErr.Add(1)
 		m.log.Debug("failed to decode hardware frame", "error", err)
 		m.dispatchError(fmt.Errorf("kiss: decode hw frame: %w", err))
 		return
 	}
 
 	if subCmd == HW_RESP_TX_DONE && m.txResult != nil && m.txPending.Load() {
+		// TX_DONE carries a result byte: 0x01 = sent, 0x00 = failed (radio busy /
+		// startSendRaw failed / airtime timeout). See firmware KissModem.cpp
+		// processTx(). We target MeshCore 1.16+ as the KISS baseline, where this
+		// byte is always present, so anything other than 0x01 is a failed transmit.
+		res := error(nil)
+		if len(data) < 1 || data[0] != 0x01 {
+			res = ErrTxFailed
+		}
 		select {
-		case m.txResult <- nil:
+		case m.txResult <- res:
 		default:
 		}
 	}

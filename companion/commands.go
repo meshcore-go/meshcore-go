@@ -1,6 +1,9 @@
 package companion
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"unicode/utf8"
+)
 
 type AppStartCommand struct {
 	AppVersion byte
@@ -24,10 +27,10 @@ func (c DeviceQueryCommand) ToBytes() []byte {
 	return []byte{CmdDeviceQuery, c.AppTargetVersion}
 }
 
-type GetBatteryVoltageCommand struct{}
+type GetBattAndStorageCommand struct{}
 
-func (GetBatteryVoltageCommand) ToBytes() []byte {
-	return []byte{CmdGetBatteryVoltage}
+func (GetBattAndStorageCommand) ToBytes() []byte {
+	return []byte{CmdGetBattAndStorage}
 }
 
 type SyncNextMessageCommand struct{}
@@ -208,7 +211,7 @@ type SetTxPowerCommand struct {
 }
 
 func (c SetTxPowerCommand) ToBytes() []byte {
-	return []byte{CmdSetTxPower, c.TxPower}
+	return []byte{CmdSetRadioTxPower, c.TxPower}
 }
 
 type ResetPathCommand struct {
@@ -496,11 +499,15 @@ func (c SendPathDiscoveryReqCommand) ToBytes() []byte {
 
 type SetFloodScopeCommand struct {
 	TransportKey []byte
+	Unscoped     bool
 }
 
 func (c SetFloodScopeCommand) ToBytes() []byte {
+	if c.Unscoped {
+		return []byte{CmdSetFloodScopeKey, 1}
+	}
 	buf := make([]byte, 2+len(c.TransportKey))
-	buf[0] = CmdSetFloodScope
+	buf[0] = CmdSetFloodScopeKey
 	copy(buf[2:], c.TransportKey)
 	return buf
 }
@@ -602,4 +609,55 @@ type GetTuningParamsCommand struct{}
 
 func (GetTuningParamsCommand) ToBytes() []byte {
 	return []byte{CmdGetTuningParams}
+}
+
+type SetDefaultFloodScopeCommand struct {
+	Name string
+	Key  []byte
+}
+
+func (c SetDefaultFloodScopeCommand) ToBytes() []byte {
+	if c.Name == "" || len(c.Key) != 16 {
+		return []byte{CmdSetDefaultFloodScope}
+	}
+
+	buf := make([]byte, 48)
+	buf[0] = CmdSetDefaultFloodScope
+
+	nameBytes := []byte(c.Name)
+	if len(nameBytes) > 30 {
+		nameBytes = nameBytes[:30]
+		// Drop a trailing rune split by the 30-byte cut so we never emit a
+		// partial UTF-8 sequence (firmware reads the name with strlen, leaving
+		// 1 byte for the null terminator in the 31-byte field).
+		for len(nameBytes) > 0 {
+			if r, size := utf8.DecodeLastRune(nameBytes); r != utf8.RuneError || size > 1 {
+				break
+			}
+			nameBytes = nameBytes[:len(nameBytes)-1]
+		}
+	}
+	copy(buf[1:32], nameBytes)
+
+	copy(buf[32:48], c.Key)
+	return buf
+}
+
+type GetDefaultFloodScopeCommand struct{}
+
+func (GetDefaultFloodScopeCommand) ToBytes() []byte {
+	return []byte{CmdGetDefaultFloodScope}
+}
+
+type SendRawPacketCommand struct {
+	Priority byte
+	Packet   []byte
+}
+
+func (c SendRawPacketCommand) ToBytes() []byte {
+	buf := make([]byte, 2+len(c.Packet))
+	buf[0] = CmdSendRawPacket
+	buf[1] = c.Priority
+	copy(buf[2:], c.Packet)
+	return buf
 }

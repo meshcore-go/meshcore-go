@@ -11,7 +11,7 @@ import (
 
 type Modem interface {
 	SendData(data []byte) error
-	SetDataHandler(func(data []byte, snr int8, rssi int8))
+	SetDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool))
 	AddOutboundHandler(h func([]byte))
 }
 
@@ -28,7 +28,7 @@ type virtualRadio struct {
 	mux       *RadioMux
 	filter    PacketFilter
 	dataH     func(*meshcore.Packet)
-	rawDataH  func([]byte, int8, int8)
+	rawDataH  func([]byte, float32, int8, bool)
 	outboundH []func([]byte)
 	mu        sync.RWMutex
 }
@@ -66,7 +66,7 @@ func (v *virtualRadio) SetDataHandler(h func(*meshcore.Packet)) {
 	v.mu.Unlock()
 }
 
-func (v *virtualRadio) SetRawDataHandler(h func([]byte, int8, int8)) {
+func (v *virtualRadio) SetRawDataHandler(h func([]byte, float32, int8, bool)) {
 	v.mu.Lock()
 	v.rawDataH = h
 	v.mu.Unlock()
@@ -93,7 +93,7 @@ func (v *virtualRadio) wants(pkt *meshcore.Packet) bool {
 	return f(pkt)
 }
 
-func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr int8, rssi int8) {
+func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr float32, rssi int8, hasSignalInfo bool) {
 	v.mu.RLock()
 	h := v.dataH
 	rh := v.rawDataH
@@ -102,7 +102,7 @@ func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr int8, rssi 
 		h(pkt)
 	}
 	if rh != nil {
-		rh(raw, snr, rssi)
+		rh(raw, snr, rssi, hasSignalInfo)
 	}
 }
 
@@ -210,6 +210,10 @@ func (m *RadioMux) txQueueLen() int {
 	return m.tx.queueLen()
 }
 
+func (m *RadioMux) TxStats() TxStats {
+	return m.tx.stats()
+}
+
 func (m *RadioMux) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.done)
@@ -237,7 +241,7 @@ func (m *RadioMux) remove(v *virtualRadio) {
 	m.mu.Unlock()
 }
 
-func (m *RadioMux) onData(data []byte, snr int8, rssi int8) {
+func (m *RadioMux) onData(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
 	pkt, err := meshcore.PacketFromBytes(data)
 	if err != nil {
 		m.log.Debug("failed to parse packet", "error", err, "data_len", len(data), "hex", hex.EncodeToString(data))
@@ -248,6 +252,7 @@ func (m *RadioMux) onData(data []byte, snr int8, rssi int8) {
 	}
 	pkt.SNR = snr
 	pkt.RSSI = rssi
+	pkt.HasSignalInfo = hasSignalInfo
 
 	m.mu.RLock()
 	radios := make([]*virtualRadio, len(m.radios))
@@ -262,7 +267,7 @@ func (m *RadioMux) onData(data []byte, snr int8, rssi int8) {
 			}
 			rawCopy := make([]byte, len(data))
 			copy(rawCopy, data)
-			v.deliver(clone, rawCopy, snr, rssi)
+			v.deliver(clone, rawCopy, snr, rssi, hasSignalInfo)
 		}
 	}
 }
@@ -278,6 +283,7 @@ func clonePacket(pkt *meshcore.Packet) (*meshcore.Packet, error) {
 	}
 	clone.SNR = pkt.SNR
 	clone.RSSI = pkt.RSSI
+	clone.HasSignalInfo = pkt.HasSignalInfo
 	return clone, nil
 }
 

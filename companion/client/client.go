@@ -398,16 +398,16 @@ func (c *Client) SendChannelTextMessage(ctx context.Context, channelIdx byte, te
 	return resp.Data.(companion.SentResponse), nil
 }
 
-// GetBatteryVoltage returns the device's battery voltage and storage info.
-func (c *Client) GetBatteryVoltage(ctx context.Context) (companion.BatteryVoltageResponse, error) {
+// GetBattAndStorage returns the device's battery voltage and storage info.
+func (c *Client) GetBattAndStorage(ctx context.Context) (companion.BattAndStorageResponse, error) {
 	resp, err := c.sendAndWait(ctx,
-		companion.GetBatteryVoltageCommand{}.ToBytes(),
-		companion.RespBatteryVoltage, companion.RespErr,
+		companion.GetBattAndStorageCommand{}.ToBytes(),
+		companion.RespBattAndStorage, companion.RespErr,
 	)
 	if err != nil {
-		return companion.BatteryVoltageResponse{}, err
+		return companion.BattAndStorageResponse{}, err
 	}
-	return resp.Data.(companion.BatteryVoltageResponse), nil
+	return resp.Data.(companion.BattAndStorageResponse), nil
 }
 
 // SetAdvertName sets the device's advertisement name and waits for Ok.
@@ -726,6 +726,13 @@ func (c *Client) SetFloodScope(ctx context.Context, transportKey []byte) error {
 	return err
 }
 
+// SetFloodScopeUnscoped clears the flood scope so floods are unscoped and waits for Ok.
+func (c *Client) SetFloodScopeUnscoped(ctx context.Context) error {
+	cmd := companion.SetFloodScopeCommand{Unscoped: true}
+	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+	return err
+}
+
 // SendChannelData sends binary data to a channel and waits for Ok.
 func (c *Client) SendChannelData(ctx context.Context, channelIdx byte, path []byte, dataType uint16, payload []byte) error {
 	cmd := companion.SendChannelDataCommand{
@@ -791,6 +798,48 @@ func (c *Client) GetTuningParams(ctx context.Context) (companion.TuningParamsRes
 		return companion.TuningParamsResponse{}, err
 	}
 	return resp.Data.(companion.TuningParamsResponse), nil
+}
+
+// SetDefaultFloodScope sets the default flood scope name and key and waits for Ok.
+func (c *Client) SetDefaultFloodScope(ctx context.Context, name string, key []byte) error {
+	cmd := companion.SetDefaultFloodScopeCommand{Name: name, Key: key}
+	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+	return err
+}
+
+// ClearDefaultFloodScope clears the default flood scope and waits for Ok.
+func (c *Client) ClearDefaultFloodScope(ctx context.Context) error {
+	cmd := companion.SetDefaultFloodScopeCommand{}
+	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+	return err
+}
+
+// GetDefaultFloodScope retrieves the default flood scope name and key.
+func (c *Client) GetDefaultFloodScope(ctx context.Context) (companion.DefaultFloodScopeResponse, error) {
+	resp, err := c.sendAndWait(ctx,
+		companion.GetDefaultFloodScopeCommand{}.ToBytes(),
+		companion.RespDefaultFloodScope, companion.RespErr,
+	)
+	if err != nil {
+		return companion.DefaultFloodScopeResponse{}, err
+	}
+	return resp.Data.(companion.DefaultFloodScopeResponse), nil
+}
+
+// SendRawPacket sends a fully-formed raw mesh packet at the given priority and waits for Ok.
+func (c *Client) SendRawPacket(ctx context.Context, priority uint8, rawPacket []byte) error {
+	cmd := companion.SendRawPacketCommand{Priority: priority, Packet: rawPacket}
+	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+	return err
+}
+
+// SendPacket serializes a mesh packet and sends it at the given priority via SendRawPacket.
+func (c *Client) SendPacket(ctx context.Context, priority uint8, packet *meshcore.Packet) error {
+	raw, err := packet.ToBytes()
+	if err != nil {
+		return fmt.Errorf("serialize packet: %w", err)
+	}
+	return c.SendRawPacket(ctx, priority, raw)
 }
 
 type DeviceError struct {

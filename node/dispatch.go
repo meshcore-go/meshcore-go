@@ -13,6 +13,14 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 
 	n.retries.handlePacket(pkt)
 
+	// Early ACK receive: process ACKs on direct-routed packets before
+	// routing decisions — matches C++ firmware behavior. This lets us
+	// notice ACKs passing through us as a relay, not just ones delivered
+	// to us.
+	if pkt.IsRouteDirect() && pkt.PayloadType() == meshcore.PayloadTypeAck && pkt.PathHashCount() > 0 {
+		n.acks.handleACK(pkt)
+	}
+
 	if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 		if !n.router.dedup.HasSeen(pkt) {
 			n.dispatchPacket(pkt)
@@ -52,7 +60,7 @@ func (n *Node) handleAdvert(pkt *meshcore.Packet) {
 		return
 	}
 
-	n.peers.Update(adv, pkt.SNR, pkt.RSSI, pkt.Path)
+	n.peers.Update(adv, pkt.SNR, pkt.RSSI, pkt.HasSignalInfo, pkt.Path)
 }
 
 func (n *Node) dispatchPacket(pkt *meshcore.Packet) {

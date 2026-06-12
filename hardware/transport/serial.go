@@ -16,10 +16,15 @@ type SerialConfig struct {
 }
 
 type SerialTransport struct {
-	config    SerialConfig
-	port      serial.Port
-	onFrame   FrameHandler
-	onError   ErrorHandler
+	config SerialConfig
+	port   serial.Port
+
+	hMu     sync.RWMutex
+	onFrame FrameHandler
+	onError ErrorHandler
+
+	writeMu sync.Mutex
+
 	done      chan struct{}
 	dead      chan struct{}
 	closeOnce sync.Once
@@ -45,7 +50,10 @@ func (t *SerialTransport) Connect(_ context.Context) error {
 	}
 
 	t.port = port
-	go readLoop(t.port, t.done, t.dead, t.onFrame, t.onError)
+	go readLoop(t.port, t.done, t.dead, readLoopConfig{
+		getFrameHandler: t.frameHandler,
+		getErrorHandler: t.errorHandler,
+	})
 
 	return nil
 }
@@ -68,15 +76,33 @@ func (t *SerialTransport) Send(data []byte) error {
 		return fmt.Errorf("serial transport not connected")
 	}
 
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	return writeRaw(t.port, data)
 }
 
 func (t *SerialTransport) SetFrameHandler(h func(*hardware.KissFrame)) {
+	t.hMu.Lock()
 	t.onFrame = h
+	t.hMu.Unlock()
 }
 
 func (t *SerialTransport) SetErrorHandler(h func(error)) {
+	t.hMu.Lock()
 	t.onError = h
+	t.hMu.Unlock()
+}
+
+func (t *SerialTransport) frameHandler() FrameHandler {
+	t.hMu.RLock()
+	defer t.hMu.RUnlock()
+	return t.onFrame
+}
+
+func (t *SerialTransport) errorHandler() ErrorHandler {
+	t.hMu.RLock()
+	defer t.hMu.RUnlock()
+	return t.onError
 }
 
 func (t *SerialTransport) Dead() <-chan struct{} {

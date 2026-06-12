@@ -96,9 +96,16 @@ type KissFrame struct {
 	Command byte
 	Data    []byte
 
-	SNR  int8
-	RSSI int8
+	SNR           float32 // Real decibels. See snrDBFromWire for the wire format.
+	RSSI          int8
+	HasSignalInfo bool
 }
+
+// snrDBFromWire converts an on-wire SNR byte to real decibels. MeshCore
+// firmware encodes SNR in quarter-dB units — it sends (int8)round(snr_dB * 4)
+// (see kiss_modem/main.cpp: snr = getLastSNR()*4). Dividing by 4 recovers real
+// dB with exact 0.25 dB resolution.
+func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
 
 // RadioConfig holds the radio configuration parameters.
 type RadioConfig struct {

@@ -304,7 +304,7 @@ func TestControlDiscoverResponse(t *testing.T) {
 	for i := range pubkey {
 		pubkey[i] = byte(i)
 	}
-	data := []byte{0x92, byte(0xF4)} // 0xF4 = -12 as int8
+	data := []byte{0x92, byte(0xF4)} // 0xF4 = -12 (int8) on wire = -3.0 dB (quarter-dB / 4)
 	tag := make([]byte, 4)
 	binary.LittleEndian.PutUint32(tag, 0xDEADBEEF)
 	data = append(data, tag...)
@@ -322,8 +322,8 @@ func TestControlDiscoverResponse(t *testing.T) {
 	if resp.NodeType != AdvertTypeRepeater {
 		t.Errorf("NodeType = %d, want %d (REPEATER)", resp.NodeType, AdvertTypeRepeater)
 	}
-	if resp.SNR != -12 {
-		t.Errorf("SNR = %d, want -12", resp.SNR)
+	if resp.SNR != -3 {
+		t.Errorf("SNR = %g, want -3", resp.SNR)
 	}
 	if resp.Tag != 0xDEADBEEF {
 		t.Errorf("Tag = 0x%08X, want 0xDEADBEEF", resp.Tag)

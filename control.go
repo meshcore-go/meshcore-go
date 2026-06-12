@@ -83,7 +83,7 @@ func (c *Control) DiscoverRequest() (*DiscoverRequest, error) {
 
 type DiscoverResponse struct {
 	NodeType byte
-	SNR      int8
+	SNR      float32 // Real decibels. Firmware sends packet->_snr (quarter-dB, ×4).
 	Tag      uint32
 	PubKey   []byte
 }
@@ -97,7 +97,7 @@ func (c *Control) DiscoverResponse() (*DiscoverResponse, error) {
 	}
 	resp := &DiscoverResponse{
 		NodeType: c.Flags & 0x0F,
-		SNR:      int8(c.Data[0]),
+		SNR:      snrDBFromWire(int8(c.Data[0])),
 		Tag:      binary.LittleEndian.Uint32(c.Data[1:5]),
 	}
 	if len(c.Data) > 5 {

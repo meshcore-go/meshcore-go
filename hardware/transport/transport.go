@@ -24,17 +24,57 @@ type Transport interface {
 	Dead() <-chan struct{}
 }
 
-func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame FrameHandler, onError ErrorHandler) {
+// beforeRead is an optional hook invoked before each conn.Read. Transports
+// use it to refresh per-read deadlines (e.g. TCP idle timeouts). A non-nil
+// error from the hook is reported via the error getter and terminates the
+// loop.
+type beforeReadFunc = func() error
+
+// readLoopConfig wires runtime-mutable handlers and an optional pre-read
+// hook into the shared read loop. Handler getters are called per iteration
+// so transports can swap handlers safely under their own lock.
+type readLoopConfig struct {
+	getFrameHandler func() FrameHandler
+	getErrorHandler func() ErrorHandler
+	beforeRead      beforeReadFunc
+}
+
+func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, cfg readLoopConfig) {
 	defer close(dead)
 
 	buf := make([]byte, 1024)
 	var remainder []byte
+
+	dispatchErr := func(err error) {
+		if cfg.getErrorHandler == nil {
+			return
+		}
+		if h := cfg.getErrorHandler(); h != nil {
+			h(err)
+		}
+	}
+
+	dispatchFrame := func(frame *hardware.KissFrame) {
+		if cfg.getFrameHandler == nil {
+			return
+		}
+		if h := cfg.getFrameHandler(); h != nil {
+			h(frame)
+		}
+	}
 
 	for {
 		select {
 		case <-done:
 			return
 		default:
+		}
+
+		if cfg.beforeRead != nil {
+			if err := cfg.beforeRead(); err != nil {
+				dispatchErr(fmt.Errorf("set read deadline: %w", err))
+				return
+			}
 		}
 
 		n, err := conn.Read(buf)
@@ -45,22 +85,16 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame 
 			remainder = rem
 
 			if len(remainder) > hardware.KISS_MAX_FRAME_SIZE {
-				if onError != nil {
-					onError(fmt.Errorf("kiss: remainder exceeded max frame size, resyncing"))
-				}
+				dispatchErr(fmt.Errorf("kiss: remainder exceeded max frame size, resyncing"))
 				remainder = nil
 			}
 
-			for _, err := range decodeErrs {
-				if onError != nil {
-					onError(err)
-				}
+			for _, derr := range decodeErrs {
+				dispatchErr(derr)
 			}
 
 			for _, frame := range frames {
-				if onFrame != nil {
-					onFrame(frame)
-				}
+				dispatchFrame(frame)
 			}
 		}
 
@@ -71,9 +105,7 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, onFrame 
 			default:
 			}
 
-			if onError != nil {
-				onError(err)
-			}
+			dispatchErr(err)
 			return
 		}
 

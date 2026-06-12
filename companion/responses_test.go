@@ -87,6 +87,21 @@ func TestParseResponse(t *testing.T) {
 	var pushLoginPrefix [6]byte
 	copy(pushLoginPrefix[:], []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
 
+	var pushLoginFailPrefix [6]byte
+	copy(pushLoginFailPrefix[:], []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+
+	var pushContactDeletedKey [32]byte
+	for i := range 32 {
+		pushContactDeletedKey[i] = byte(0x70 + i)
+	}
+
+	defaultFloodScopePayload := make([]byte, 0, 31+16)
+	floodScopeName := make([]byte, 31)
+	copy(floodScopeName, []byte("region1"))
+	defaultFloodScopePayload = append(defaultFloodScopePayload, floodScopeName...)
+	floodScopeKey := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	defaultFloodScopePayload = append(defaultFloodScopePayload, floodScopeKey...)
+
 	var pushStatusPrefix [6]byte
 	copy(pushStatusPrefix[:], []byte{0x21, 0x22, 0x23, 0x24, 0x25, 0x26})
 
@@ -170,7 +185,7 @@ func TestParseResponse(t *testing.T) {
 		{name: "custom vars", frameData: hexBytes(t, "15666f6f3a6261722c62617a3a717578"), wantCode: RespCustomVars, wantData: CustomVarsResponse{Vars: "foo:bar,baz:qux"}},
 		{name: "advert path", frameData: hexBytes(t, "164433221103aabbcc"), wantCode: RespAdvertPath, wantData: AdvertPathResponse{RecvTimestamp: 0x11223344, PathLen: 0x03, Path: []byte{0xaa, 0xbb, 0xcc}}},
 		{name: "stats core", frameData: hexBytes(t, "1800e40c44332211f00007"), wantCode: RespStats, wantData: StatsResponse{StatsType: StatsTypeCore, Core: &CoreStats{BatteryMV: 3300, UptimeSecs: 0x11223344, ErrFlags: 0x00f0, QueueLen: 0x07}}},
-		{name: "stats radio", frameData: hexBytes(t, "180188ffba0c0403020108070605"), wantCode: RespStats, wantData: StatsResponse{StatsType: StatsTypeRadio, Radio: &RadioStats{NoiseFloor: -120, LastRSSI: int8(-70), LastSNR: int8(12), TxAirSecs: 0x01020304, RxAirSecs: 0x05060708}}},
+		{name: "stats radio", frameData: hexBytes(t, "180188ffba0c0403020108070605"), wantCode: RespStats, wantData: StatsResponse{StatsType: StatsTypeRadio, Radio: &RadioStats{NoiseFloor: -120, LastRSSI: int8(-70), LastSNR: 3, TxAirSecs: 0x01020304, RxAirSecs: 0x05060708}}}, // 12/4 = 3.0 dB
 		{name: "stats packets", frameData: hexBytes(t, "180201000000020000000300000004000000050000000600000007000000"), wantCode: RespStats, wantData: StatsResponse{StatsType: StatsTypePackets, Packets: &PacketStats{PacketsRecv: 1, PacketsSent: 2, SentFlood: 3, SentDirect: 4, RecvFlood: 5, RecvDirect: 6, RecvErrors: 7}}},
 		{name: "auto add config", frameData: hexBytes(t, "191304"), wantCode: RespAutoAddConfig, wantData: AutoAddConfigResponse{Config: 0x13, MaxHops: 0x04}},
 		{name: "allowed repeat freq", frameData: hexBytes(t, "1a01000000020000000300000004000000"), wantCode: RespAllowedRepeatFreq, wantData: AllowedRepeatFreqResponse{Ranges: []FreqRange{{LowerFreq: 1, UpperFreq: 2}, {LowerFreq: 3, UpperFreq: 4}}}},
@@ -181,7 +196,7 @@ func TestParseResponse(t *testing.T) {
 			frameData: hexBytes(t, "1bf90000fe03341203aabbcc"),
 			wantCode:  RespChannelDataRecv,
 			wantData: ChannelDataRecvResponse{
-				SNR:        int8(-7),
+				SNR:        -1.75, // -7/4 dB
 				ChannelIdx: int8(-2),
 				PathLen:    0x03,
 				DataType:   0x1234,
@@ -192,10 +207,10 @@ func TestParseResponse(t *testing.T) {
 		{name: "push path updated", frameData: append([]byte{PushPathUpdated}, pushPathUpdatedPublicKey[:]...), wantCode: PushPathUpdated, wantData: PushPathUpdatedResponse{PublicKey: pushPathUpdatedPublicKey}},
 		{name: "push send confirmed", frameData: hexBytes(t, "82040302010d0c0b0a"), wantCode: PushSendConfirmed, wantData: PushSendConfirmedResponse{AckCode: 0x01020304, RoundTrip: 0x0a0b0c0d}},
 		{name: "push msg waiting", frameData: []byte{PushMsgWaiting}, wantCode: PushMsgWaiting, wantData: PushMsgWaitingResponse{}},
-		{name: "push raw data", frameData: hexBytes(t, "84ffd600112233"), wantCode: PushRawData, wantData: PushRawDataResponse{LastSNR: int8(-1), LastRSSI: int8(-42), Payload: []byte{0x11, 0x22, 0x33}}},
+		{name: "push raw data", frameData: hexBytes(t, "84ffd600112233"), wantCode: PushRawData, wantData: PushRawDataResponse{LastSNR: -0.25, LastRSSI: int8(-42), Payload: []byte{0x11, 0x22, 0x33}}}, // -1/4 dB
 		{name: "push login success", frameData: hexBytes(t, "85ee112233445566"), wantCode: PushLoginSuccess, wantData: PushLoginSuccessResponse{PubKeyPrefix: pushLoginPrefix}},
 		{name: "push status resp", frameData: hexBytes(t, "8700212223242526deadbeef"), wantCode: PushStatusResponse, wantData: PushStatusResp{PubKeyPrefix: pushStatusPrefix, StatusData: []byte{0xde, 0xad, 0xbe, 0xef}}},
-		{name: "push log rx data", frameData: hexBytes(t, "8805f0aabb"), wantCode: PushLogRxData, wantData: PushLogRxDataResponse{LastSNR: int8(5), LastRSSI: int8(-16), Raw: []byte{0xaa, 0xbb}}},
+		{name: "push log rx data", frameData: hexBytes(t, "8805f0aabb"), wantCode: PushLogRxData, wantData: PushLogRxDataResponse{LastSNR: 1.25, LastRSSI: int8(-16), Raw: []byte{0xaa, 0xbb}}}, // 5/4 dB
 		{
 			name:      "push trace data",
 			frameData: hexBytes(t, "890002a54433221188776655102001fffd"),
@@ -206,8 +221,8 @@ func TestParseResponse(t *testing.T) {
 				Tag:        0x11223344,
 				AuthCode:   0x55667788,
 				PathHashes: []byte{0x10, 0x20},
-				PathSnrs:   []byte{0x01, 0xff},
-				LastSNR:    int8(-3),
+				PathSnrs:   []byte{0x01, 0xff}, // raw quarter-dB, left unscaled
+				LastSNR:    -0.75,              // -3/4 dB
 			},
 		},
 		{
@@ -230,7 +245,12 @@ func TestParseResponse(t *testing.T) {
 		{name: "push telemetry resp", frameData: hexBytes(t, "8b00313233343536010203"), wantCode: PushTelemetryResponse, wantData: PushTelemetryResp{PubKeyPrefix: pushTelemetryPrefix, LPPData: []byte{0x01, 0x02, 0x03}}},
 		{name: "push binary resp", frameData: hexBytes(t, "8c00ddccbbaafeed"), wantCode: PushBinaryResponse, wantData: PushBinaryResp{Tag: 0xaabbccdd, ResponseData: []byte{0xfe, 0xed}}},
 		{name: "push path discovery resp", frameData: hexBytes(t, "8d0011223344556602aabb03010203"), wantCode: PushPathDiscoveryResponse, wantData: PushPathDiscoveryResp{PubKeyPrefix: pushPathDiscoveryPrefix, OutPathLen: 0x02, OutPath: []byte{0xaa, 0xbb}, InPathLen: 0x03, InPath: []byte{0x01, 0x02, 0x03}}},
-		{name: "push control data", frameData: hexBytes(t, "8ef9d602deadbeef"), wantCode: PushControlData, wantData: PushControlDataResp{SNR: int8(-7), RSSI: int8(-42), PathLen: 0x02, Payload: []byte{0xde, 0xad, 0xbe, 0xef}}},
+		{name: "push control data", frameData: hexBytes(t, "8ef9d602deadbeef"), wantCode: PushControlData, wantData: PushControlDataResp{SNR: -1.75, RSSI: int8(-42), PathLen: 0x02, Payload: []byte{0xde, 0xad, 0xbe, 0xef}}}, // -7/4 dB
+		{name: "default flood scope null", frameData: []byte{RespDefaultFloodScope}, wantCode: RespDefaultFloodScope, wantData: DefaultFloodScopeResponse{}},
+		{name: "default flood scope named", frameData: append([]byte{RespDefaultFloodScope}, defaultFloodScopePayload...), wantCode: RespDefaultFloodScope, wantData: DefaultFloodScopeResponse{Name: "region1", Key: floodScopeKey}},
+		{name: "push login fail", frameData: hexBytes(t, "8600aabbccddeeff"), wantCode: PushLoginFail, wantData: PushLoginFailResponse{PubKeyPrefix: pushLoginFailPrefix}},
+		{name: "push contact deleted", frameData: append([]byte{PushContactDeleted}, pushContactDeletedKey[:]...), wantCode: PushContactDeleted, wantData: PushContactDeletedResponse{PublicKey: pushContactDeletedKey}},
+		{name: "push contacts full", frameData: []byte{PushContactsFull}, wantCode: PushContactsFull, wantData: PushContactsFullResponse{}},
 		{name: "no more messages", frameData: hexBytes(t, "0a"), wantCode: RespNoMoreMessages, wantData: NoMoreMessagesResponse{}},
 		{name: "sent no ack", frameData: hexBytes(t, "06"), wantCode: RespSent, wantData: SentResponse{HasAckCode: false}},
 		{name: "sent with ack", frameData: hexBytes(t, "0605000000"), wantCode: RespSent, wantData: SentResponse{AckCode: 5, HasAckCode: true}},
@@ -265,7 +285,7 @@ func TestParseResponse(t *testing.T) {
 			frameData: hexBytes(t, "10140000a1a2a3a4a5a6030044332211796f"),
 			wantCode:  RespContactMsgRecvV3,
 			wantData: ContactMsgRecvV3Response{
-				SNR:             int8(20),
+				SNR:             5, // 20/4 dB
 				PubKeyPrefix:    [6]byte{0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6},
 				PathLen:         0x03,
 				TxtType:         0x00,
@@ -278,7 +298,7 @@ func TestParseResponse(t *testing.T) {
 			frameData: hexBytes(t, "11fc0000020400887766556f6b"),
 			wantCode:  RespChannelMsgRecvV3,
 			wantData: ChannelMsgRecvV3Response{
-				SNR:             int8(-4),
+				SNR:             -1, // -4/4 dB
 				ChannelIdx:      0x02,
 				PathLen:         0x04,
 				TxtType:         0x00,
@@ -286,8 +306,8 @@ func TestParseResponse(t *testing.T) {
 				Text:            "ok",
 			},
 		},
-		{name: "battery voltage only", frameData: hexBytes(t, "0ce803"), wantCode: RespBatteryVoltage, wantData: BatteryVoltageResponse{BatteryMilliVolts: 1000}},
-		{name: "battery full", frameData: hexBytes(t, "0ce8030010000000200000"), wantCode: RespBatteryVoltage, wantData: BatteryVoltageResponse{BatteryMilliVolts: 1000, UsedStorageKB: 4096, TotalStorageKB: 8192}},
+		{name: "battery voltage only", frameData: hexBytes(t, "0ce803"), wantCode: RespBattAndStorage, wantData: BattAndStorageResponse{BatteryMilliVolts: 1000}},
+		{name: "battery full", frameData: hexBytes(t, "0ce8030010000000200000"), wantCode: RespBattAndStorage, wantData: BattAndStorageResponse{BatteryMilliVolts: 1000, UsedStorageKB: 4096, TotalStorageKB: 8192}},
 		{
 			name:      "self info",
 			frameData: append([]byte{RespSelfInfo}, selfPayload...),
@@ -356,7 +376,7 @@ func TestResponseParsersErrors(t *testing.T) {
 		{name: "contacts start invalid length 2", parse: func() error { _, err := ParseContactsStartResponse([]byte{0x01, 0x02}); return err }, wantErr: true},
 		{name: "contacts start invalid length 3", parse: func() error { _, err := ParseContactsStartResponse([]byte{0x01, 0x02, 0x03}); return err }, wantErr: true},
 		{name: "curr time short", parse: func() error { _, err := ParseCurrTimeResponse([]byte{0x01, 0x02, 0x03}); return err }, wantErr: true},
-		{name: "battery short", parse: func() error { _, err := ParseBatteryVoltageResponse([]byte{0x01}); return err }, wantErr: true},
+		{name: "battery short", parse: func() error { _, err := ParseBattAndStorageResponse([]byte{0x01}); return err }, wantErr: true},
 		{name: "self info short", parse: func() error { _, err := ParseSelfInfoResponse(make([]byte, 56)); return err }, wantErr: true},
 		{name: "device info short for v3", parse: func() error { _, err := ParseDeviceInfoResponse(append([]byte{0x03}, make([]byte, 17)...)); return err }, wantErr: true},
 		{name: "device info v2 allowed", parse: func() error { _, err := ParseDeviceInfoResponse([]byte{0x02}); return err }, wantErr: false},
@@ -392,6 +412,11 @@ func TestResponseParsersErrors(t *testing.T) {
 		{name: "push binary resp short", parse: func() error { _, err := ParsePushBinaryResp(make([]byte, 4)); return err }, wantErr: true},
 		{name: "push path discovery resp short", parse: func() error { _, err := ParsePushPathDiscoveryResp(make([]byte, 8)); return err }, wantErr: true},
 		{name: "push control data short", parse: func() error { _, err := ParsePushControlDataResp(make([]byte, 2)); return err }, wantErr: true},
+		{name: "default flood scope empty allowed", parse: func() error { _, err := ParseDefaultFloodScopeResponse(nil); return err }, wantErr: false},
+		{name: "default flood scope short", parse: func() error { _, err := ParseDefaultFloodScopeResponse(make([]byte, 46)); return err }, wantErr: true},
+		{name: "push login fail short", parse: func() error { _, err := ParsePushLoginFailResponse(make([]byte, 6)); return err }, wantErr: true},
+		{name: "push contact deleted short", parse: func() error { _, err := ParsePushContactDeletedResponse(make([]byte, 31)); return err }, wantErr: true},
+		{name: "push contacts full ignores payload", parse: func() error { _, err := ParsePushContactsFullResponse([]byte{0x01, 0x02}); return err }, wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -446,7 +471,7 @@ func TestParseStatsResponseCases(t *testing.T) {
 		{
 			name: "radio",
 			data: hexBytes(t, "0188ffba0c0403020108070605"),
-			want: StatsResponse{StatsType: StatsTypeRadio, Radio: &RadioStats{NoiseFloor: -120, LastRSSI: int8(-70), LastSNR: int8(12), TxAirSecs: 0x01020304, RxAirSecs: 0x05060708}},
+			want: StatsResponse{StatsType: StatsTypeRadio, Radio: &RadioStats{NoiseFloor: -120, LastRSSI: int8(-70), LastSNR: 3, TxAirSecs: 0x01020304, RxAirSecs: 0x05060708}}, // 12/4 = 3.0 dB
 		},
 		{
 			name: "packets",
@@ -557,7 +582,7 @@ func TestParsePushTraceDataResponseEdgeCases(t *testing.T) {
 				AuthCode:   0x55667788,
 				PathHashes: []byte{},
 				PathSnrs:   []byte{},
-				LastSNR:    int8(-3),
+				LastSNR:    -0.75, // -3/4 dB
 			},
 		},
 		{name: "truncated by path len", data: hexBytes(t, "000201443322118877665510"), wantErr: true},

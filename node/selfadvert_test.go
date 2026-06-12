@@ -123,7 +123,7 @@ func TestNode_AdvertUpdatesLocalPeerTable(t *testing.T) {
 		t.Errorf("Name = %q, want %q", p.Name, "remote-peer")
 	}
 	if p.SNR != -4 {
-		t.Errorf("SNR = %d, want -4", p.SNR)
+		t.Errorf("SNR = %g, want -4", p.SNR)
 	}
 	if p.RSSI != -75 {
 		t.Errorf("RSSI = %d, want -75", p.RSSI)

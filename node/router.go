@@ -17,7 +17,7 @@ type router struct {
 	dedup meshcore.DedupCache
 	node  *Node
 
-	send       func([]byte) error
+	send       func(data []byte, priority uint8) error
 	sendDirect func([]byte) error
 }
 
@@ -89,7 +89,7 @@ func (r *router) routeFlood(pkt *meshcore.Packet) RouteAction {
 	}
 	pk := r.node.getIdentity().PublicKey()
 	clone.AppendPathHash(pk[:])
-	r.forward(clone)
+	r.forward(clone, uint8(newCount))
 
 	return RouteActionDeliver
 }
@@ -107,7 +107,7 @@ func (r *router) canForward(pkt *meshcore.Packet) bool {
 	return f(pkt)
 }
 
-func (r *router) forward(pkt *meshcore.Packet) {
+func (r *router) forward(pkt *meshcore.Packet, priority uint8) {
 	if r.send == nil {
 		return
 	}
@@ -115,22 +115,18 @@ func (r *router) forward(pkt *meshcore.Packet) {
 	if err != nil {
 		return
 	}
-	_ = r.send(data)
+	_ = r.send(data, priority)
 }
 
 func (r *router) forwardDirect(pkt *meshcore.Packet) {
-	send := r.sendDirect
-	if send == nil {
-		send = r.send
-	}
-	if send == nil {
+	if r.sendDirect == nil {
 		return
 	}
 	data, err := pkt.ToBytes()
 	if err != nil {
 		return
 	}
-	_ = send(data)
+	_ = r.sendDirect(data)
 }
 
 func (r *router) clonePacket(pkt *meshcore.Packet) *meshcore.Packet {
@@ -144,5 +140,6 @@ func (r *router) clonePacket(pkt *meshcore.Packet) *meshcore.Packet {
 	}
 	clone.SNR = pkt.SNR
 	clone.RSSI = pkt.RSSI
+	clone.HasSignalInfo = pkt.HasSignalInfo
 	return clone
 }

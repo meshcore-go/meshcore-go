@@ -50,7 +50,7 @@ func TestCommandsToBytes(t *testing.T) {
 		{
 			name: "get battery voltage",
 			build: func() []byte {
-				return GetBatteryVoltageCommand{}.ToBytes()
+				return GetBattAndStorageCommand{}.ToBytes()
 			},
 			wantHex: "14",
 		},
@@ -466,11 +466,32 @@ func TestCommandsToBytes(t *testing.T) {
 			wantHex: "34000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 		},
 		{
-			name: "set flood scope",
+			name: "set flood scope with key",
 			build: func() []byte {
 				return SetFloodScopeCommand{TransportKey: []byte{0x01, 0x02, 0x03}}.ToBytes()
 			},
 			wantHex: "3600010203",
+		},
+		{
+			name: "set flood scope reset",
+			build: func() []byte {
+				return SetFloodScopeCommand{}.ToBytes()
+			},
+			wantHex: "3600",
+		},
+		{
+			name: "set flood scope unscoped",
+			build: func() []byte {
+				return SetFloodScopeCommand{Unscoped: true}.ToBytes()
+			},
+			wantHex: "3601",
+		},
+		{
+			name: "set flood scope unscoped ignores key",
+			build: func() []byte {
+				return SetFloodScopeCommand{TransportKey: []byte{0x01, 0x02, 0x03}, Unscoped: true}.ToBytes()
+			},
+			wantHex: "3601",
 		},
 		{
 			name: "send control data",
@@ -560,6 +581,73 @@ func TestCommandsToBytes(t *testing.T) {
 				return GetTuningParamsCommand{}.ToBytes()
 			},
 			wantHex: "2b",
+		},
+		{
+			name: "set default flood scope",
+			build: func() []byte {
+				return SetDefaultFloodScopeCommand{
+					Name: "scope",
+					Key:  []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f},
+				}.ToBytes()
+			},
+			wantHex: "3f" + "73636f7065" + strings.Repeat("00", 26) + "000102030405060708090a0b0c0d0e0f",
+		},
+		{
+			name: "set default flood scope long name truncated",
+			build: func() []byte {
+				return SetDefaultFloodScopeCommand{
+					Name: strings.Repeat("A", 40),
+					Key:  []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f},
+				}.ToBytes()
+			},
+			wantHex: "3f" + strings.Repeat("41", 30) + "00" + "101112131415161718191a1b1c1d1e1f",
+		},
+		{
+			name: "set default flood scope multibyte name truncated on rune boundary",
+			build: func() []byte {
+				// "A" + 15×"€" = 1 + 45 = 46 bytes; the 30-byte cut lands mid-"€".
+				return SetDefaultFloodScopeCommand{
+					Name: "A" + strings.Repeat("€", 15),
+					Key:  []byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f},
+				}.ToBytes()
+			},
+			// Truncates to "A"+9×"€" = 28 bytes (no split rune), zero-padded to 31, then key.
+			wantHex: "3f" + "41" + strings.Repeat("e282ac", 9) + "000000" + "202122232425262728292a2b2c2d2e2f",
+		},
+		{
+			name: "set default flood scope clear empty name",
+			build: func() []byte {
+				return SetDefaultFloodScopeCommand{}.ToBytes()
+			},
+			wantHex: "3f",
+		},
+		{
+			name: "set default flood scope clear bad key size",
+			build: func() []byte {
+				return SetDefaultFloodScopeCommand{Name: "scope", Key: []byte{0x01, 0x02, 0x03}}.ToBytes()
+			},
+			wantHex: "3f",
+		},
+		{
+			name: "get default flood scope",
+			build: func() []byte {
+				return GetDefaultFloodScopeCommand{}.ToBytes()
+			},
+			wantHex: "40",
+		},
+		{
+			name: "send raw packet",
+			build: func() []byte {
+				return SendRawPacketCommand{Priority: 1, Packet: []byte{0xde, 0xad, 0xbe, 0xef}}.ToBytes()
+			},
+			wantHex: "4101deadbeef",
+		},
+		{
+			name: "send raw packet empty packet",
+			build: func() []byte {
+				return SendRawPacketCommand{Priority: 0}.ToBytes()
+			},
+			wantHex: "4100",
 		},
 	}
 
