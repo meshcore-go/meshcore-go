@@ -3,7 +3,7 @@ module github.com/meshcore-go/meshcore-go/companion/transport
 go 1.26.1
 
 require (
-	github.com/meshcore-go/meshcore-go v1.0.6
+	github.com/meshcore-go/meshcore-go v1.0.7
 	go.bug.st/serial v1.6.4
 )
 
