@@ -43,7 +43,11 @@ func TestLPPDecode(t *testing.T) {
 		{name: "gps", hex: "0188003039FFA460003039", want: []LPPReading{{Channel: 1, Type: LPPGPS, Value: LPPGPSValue{Latitude: 1.2345, Longitude: -2.3456, Altitude: 123.45}}}},
 		{name: "switch", hex: "018E01", want: []LPPReading{{Channel: 1, Type: LPPSwitch, Value: float64(1)}}},
 		{name: "end marker stops parsing", hex: "016700D70000026864", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 21.5}}},
+		{name: "channel zero any type stops parsing", hex: "016700C8006764", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 20.0}}},
 		{name: "multi sensor payload", hex: "016700C80268640374014A", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 20.0}, {Channel: 2, Type: LPPRelativeHumidity, Value: 50.0}, {Channel: 3, Type: LPPVoltage, Value: 3.3}}},
+		{name: "polyline two points", hex: "05F009E3002710004E20E3", want: []LPPReading{{Channel: 5, Type: LPPPolyline, Value: LPPPolylineValue{Factor: 227, Coordinates: []LPPCoordinate{{Latitude: 1.0, Longitude: 2.0}, {Latitude: 1.0003, Longitude: 1.9998}}}}}},
+		{name: "polyline mid payload", hex: "016700C805F009E3002710004E20E30374014A", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 20.0}, {Channel: 5, Type: LPPPolyline, Value: LPPPolylineValue{Factor: 227, Coordinates: []LPPCoordinate{{Latitude: 1.0, Longitude: 2.0}, {Latitude: 1.0003, Longitude: 1.9998}}}}, {Channel: 3, Type: LPPVoltage, Value: 3.3}}},
+		{name: "polyline bad size", hex: "05F005E300271000", wantErr: true},
 		{name: "truncated input", hex: "016700", wantErr: true},
 		{name: "truncated header", hex: "01", wantErr: true},
 		{name: "unknown type", hex: "01FF00", wantErr: true},
@@ -116,6 +120,9 @@ func TestLPPEncode(t *testing.T) {
 			e.AddRelativeHumidity(2, 50)
 			e.AddVoltage(3, 3.3)
 		}, wantHex: "016700C80268640374014A"},
+		{name: "polyline two points", build: func(e *LPPEncoder) {
+			_ = e.AddPolyline(5, []LPPCoordinate{{Latitude: 1.0, Longitude: 2.0}, {Latitude: 1.0003, Longitude: 1.9998}}, LPPPrec0_0001, LPPSimplifyNone)
+		}, wantHex: "05F009E3002710004E20E3"},
 	}
 
 	for _, tt := range tests {
@@ -158,6 +165,118 @@ func TestLPPRoundTrip(t *testing.T) {
 
 	for i := range readings {
 		assertReadingEqual(t, readings[i], want[i])
+	}
+}
+
+func TestLPPPolylineRoundTrip(t *testing.T) {
+	tests := []struct {
+		name       string
+		coords     []LPPCoordinate
+		precision  LPPPrecision
+		simplify   LPPSimplification
+		wantFactor byte
+		minCoords  int // decoded coords should be at least this many
+		tolerance  float64
+	}{
+		{
+			name:       "two points full precision",
+			coords:     []LPPCoordinate{{Latitude: 1.0, Longitude: 2.0}, {Latitude: 1.0003, Longitude: 1.9998}},
+			precision:  LPPPrec0_0001,
+			simplify:   LPPSimplifyNone,
+			wantFactor: 227,
+			minCoords:  2,
+			tolerance:  0.0001,
+		},
+		{
+			name: "short track douglas-peucker",
+			coords: []LPPCoordinate{
+				{Latitude: 52.5200, Longitude: 13.4050},
+				{Latitude: 52.5203, Longitude: 13.4052},
+				{Latitude: 52.5206, Longitude: 13.4055},
+				{Latitude: 52.5209, Longitude: 13.4058},
+			},
+			precision:  LPPPrec0_0001,
+			simplify:   LPPSimplifyDouglasPeucker,
+			wantFactor: 227,
+			minCoords:  2,
+			tolerance:  0.0002,
+		},
+		{
+			name: "track lower precision factor",
+			coords: []LPPCoordinate{
+				{Latitude: 40.0000, Longitude: -74.0000},
+				{Latitude: 40.0020, Longitude: -74.0020},
+				{Latitude: 40.0040, Longitude: -74.0040},
+			},
+			precision:  LPPPrec0_001,
+			simplify:   LPPSimplifyNone,
+			wantFactor: 230,
+			minCoords:  2,
+			tolerance:  0.002,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := NewLPPEncoder()
+			if err := e.AddPolyline(7, tt.coords, tt.precision, tt.simplify); err != nil {
+				t.Fatalf("AddPolyline(): %v", err)
+			}
+
+			readings, err := LPPDecode(e.Bytes())
+			if err != nil {
+				t.Fatalf("LPPDecode(): %v", err)
+			}
+			if len(readings) != 1 {
+				t.Fatalf("len(readings) = %d, want 1", len(readings))
+			}
+			if readings[0].Channel != 7 || readings[0].Type != LPPPolyline {
+				t.Fatalf("got channel %d type %d, want 7/%d", readings[0].Channel, readings[0].Type, LPPPolyline)
+			}
+
+			pl, ok := readings[0].Value.(LPPPolylineValue)
+			if !ok {
+				t.Fatalf("value type = %T, want LPPPolylineValue", readings[0].Value)
+			}
+			if pl.Factor != tt.wantFactor {
+				t.Errorf("factor = %d, want %d", pl.Factor, tt.wantFactor)
+			}
+			if len(pl.Coordinates) < tt.minCoords {
+				t.Fatalf("decoded %d coords, want >= %d", len(pl.Coordinates), tt.minCoords)
+			}
+
+			// First and last decoded points must track the input within the
+			// chosen precision's tolerance.
+			first, last := pl.Coordinates[0], pl.Coordinates[len(pl.Coordinates)-1]
+			wantFirst, wantLast := tt.coords[0], tt.coords[len(tt.coords)-1]
+			if math.Abs(first.Latitude-wantFirst.Latitude) > tt.tolerance || math.Abs(first.Longitude-wantFirst.Longitude) > tt.tolerance {
+				t.Errorf("first coord = %#v, want ~%#v", first, wantFirst)
+			}
+			if math.Abs(last.Latitude-wantLast.Latitude) > tt.tolerance || math.Abs(last.Longitude-wantLast.Longitude) > tt.tolerance {
+				t.Errorf("last coord = %#v, want ~%#v", last, wantLast)
+			}
+		})
+	}
+}
+
+func TestLPPPolylineErrors(t *testing.T) {
+	e := NewLPPEncoder()
+
+	if err := e.AddPolyline(1, []LPPCoordinate{{Latitude: 1, Longitude: 2}}, LPPPrec0_0001, LPPSimplifyDouglasPeucker); err == nil {
+		t.Error("expected error for single-coordinate polyline")
+	}
+	if err := e.AddPolyline(1, nil, LPPPrec0_0001, LPPSimplifyNone); err == nil {
+		t.Error("expected error for empty polyline")
+	}
+	if got := len(e.Bytes()); got != 0 {
+		t.Fatalf("encoder wrote %d bytes on error, want 0", got)
+	}
+
+	// Overflow: a tiny buffer cannot hold even a minimal polyline record.
+	small := NewLPPEncoderSize(8)
+	err := small.AddPolyline(1, []LPPCoordinate{{Latitude: 1, Longitude: 2}, {Latitude: 1.001, Longitude: 2.001}}, LPPPrec0_0001, LPPSimplifyNone)
+	if err == nil {
+		t.Error("expected overflow error for undersized encoder")
 	}
 }
 
@@ -256,6 +375,23 @@ func assertReadingEqual(t *testing.T, got, want LPPReading) {
 		}
 		if gotValue != wantValue {
 			t.Fatalf("value = %#v, want %#v", gotValue, wantValue)
+		}
+	case LPPPolylineValue:
+		gotValue, ok := got.Value.(LPPPolylineValue)
+		if !ok {
+			t.Fatalf("value type = %T, want LPPPolylineValue", got.Value)
+		}
+		if gotValue.Factor != wantValue.Factor {
+			t.Fatalf("polyline factor = %d, want %d", gotValue.Factor, wantValue.Factor)
+		}
+		if len(gotValue.Coordinates) != len(wantValue.Coordinates) {
+			t.Fatalf("polyline coords len = %d, want %d", len(gotValue.Coordinates), len(wantValue.Coordinates))
+		}
+		for i := range wantValue.Coordinates {
+			if math.Abs(gotValue.Coordinates[i].Latitude-wantValue.Coordinates[i].Latitude) > 1e-6 ||
+				math.Abs(gotValue.Coordinates[i].Longitude-wantValue.Coordinates[i].Longitude) > 1e-6 {
+				t.Fatalf("polyline coord[%d] = %#v, want %#v", i, gotValue.Coordinates[i], wantValue.Coordinates[i])
+			}
 		}
 	default:
 		t.Fatalf("unsupported want value type %T", want.Value)
