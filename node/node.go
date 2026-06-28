@@ -478,7 +478,10 @@ func (n *Node) SendTextMessage(
 		return err
 	}
 
-	isDirect := len(path) > 0
+	// path semantics: nil = unknown (flood), non-nil = known route. A non-nil
+	// zero-length path is a direct 0-hop neighbour and must route direct, not
+	// flood, so test for nil rather than length.
+	isDirect := path != nil
 
 	// compose builds the TXT_MSG packet for a given attempt. The attempt is
 	// encoded into the flags byte (matching firmware composeMsgPacket) so every
