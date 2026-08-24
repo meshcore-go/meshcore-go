@@ -242,29 +242,21 @@ func (a *Advert) ToBytes() ([]byte, error) {
 }
 
 func (a *Advert) Sign(privateKey ed25519.PrivateKey) {
-	var signedData []byte
+	a.Signature = ed25519.Sign(privateKey, a.signedData())
+}
 
-	signedData = append(signedData, a.PublicKey.PublicKeyBytes()...)
+// SignWith signs the advert with a LocalIdentity (seed or expanded-key based).
+// Prefer this over Sign: an expanded-key identity has no usable seed.
+func (a *Advert) SignWith(id LocalIdentity) {
+	a.Signature = id.Sign(a.signedData())
+}
 
-	ts := make([]byte, 4)
-	binary.LittleEndian.PutUint32(ts, a.Timestamp)
-	signedData = append(signedData, ts...)
-
-	signedData = append(signedData, a.RawAppData...)
-
-	a.Signature = ed25519.Sign(privateKey, signedData)
+// signedData is pubkey ‖ little-endian timestamp ‖ app data.
+func (a *Advert) signedData() []byte {
+	d := binary.LittleEndian.AppendUint32(a.PublicKey.PublicKeyBytes(), a.Timestamp)
+	return append(d, a.RawAppData...)
 }
 
 func (a *Advert) Verify() bool {
-	var signedData []byte
-
-	signedData = append(signedData, a.PublicKey.PublicKeyBytes()...)
-
-	ts := make([]byte, 4)
-	binary.LittleEndian.PutUint32(ts, a.Timestamp)
-	signedData = append(signedData, ts...)
-
-	signedData = append(signedData, a.RawAppData...)
-
-	return a.PublicKey.Verify(signedData, a.Signature)
+	return a.PublicKey.Verify(a.signedData(), a.Signature)
 }
