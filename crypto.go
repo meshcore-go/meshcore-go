@@ -44,6 +44,48 @@ func DeriveSharedSecret(privateKeySeed []byte, peerPublicKey []byte) ([]byte, er
 	return shared, nil
 }
 
+// deriveExpandedPubKey derives the public key from an expanded key's clamped
+// scalar, mirroring MeshCore's ed25519_derive_pub. The scalar must be 32 bytes.
+func deriveExpandedPubKey(scalar []byte) []byte {
+	a, _ := edwards25519.NewScalar().SetBytesWithClamping(scalar)
+	return new(edwards25519.Point).ScalarBaseMult(a).Bytes()
+}
+
+// signWithExpandedKey produces an RFC 8032 signature directly from an expanded
+// private key (clamped scalar ‖ prefix); crypto/ed25519 can only sign from a seed.
+// ponytail: no error return — the scalar is length-checked at construction and
+// SetUniformBytes always gets a 64-byte SHA-512 sum, so neither call can fail.
+func signWithExpandedKey(scalar, prefix, pub, message []byte) []byte {
+	a, _ := edwards25519.NewScalar().SetBytesWithClamping(scalar)
+
+	hr := sha512.New()
+	hr.Write(prefix)
+	hr.Write(message)
+	r, _ := edwards25519.NewScalar().SetUniformBytes(hr.Sum(nil))
+	rBytes := new(edwards25519.Point).ScalarBaseMult(r).Bytes()
+
+	hk := sha512.New()
+	hk.Write(rBytes)
+	hk.Write(pub)
+	hk.Write(message)
+	k, _ := edwards25519.NewScalar().SetUniformBytes(hk.Sum(nil))
+
+	// S = r + k*a  (mod L)
+	s := edwards25519.NewScalar().MultiplyAdd(k, a, r)
+
+	return append(rBytes, s.Bytes()...)
+}
+
+// sharedSecretFromScalar X25519s with an expanded key's clamped scalar (the
+// scalar is already clamped; curve25519.X25519 re-clamps idempotently).
+func sharedSecretFromScalar(scalar, peerPublicKey []byte) ([]byte, error) {
+	x25519Public, err := edPublicToX25519(peerPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("converting peer public key: %w", err)
+	}
+	return curve25519.X25519(scalar, x25519Public)
+}
+
 // edPrivateToX25519 converts an Ed25519 private key seed to an X25519 private key.
 // This matches the clamping done by RFC 8032 / libsodium.
 func edPrivateToX25519(seed []byte) []byte {

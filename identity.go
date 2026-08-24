@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
@@ -112,8 +113,9 @@ func (id Identity) IsZero() bool {
 // signing and shared-secret derivation.
 type LocalIdentity struct {
 	Identity
-	seed    [ed25519.SeedSize]byte // 32-byte Ed25519 seed
-	privKey ed25519.PrivateKey     // 64-byte Ed25519 private key
+	seed [ed25519.SeedSize]byte // zero when expanded is set
+
+	expanded []byte // 64-byte expanded key (clamped scalar ‖ prefix); nil for seed-based identities
 }
 
 // GenerateLocalIdentity creates a new random LocalIdentity using the
@@ -145,23 +147,42 @@ func NewLocalIdentityFromPrivateKey(privKey ed25519.PrivateKey) (LocalIdentity, 
 	return localIdentityFromStdKey(pub, privKey), nil
 }
 
+// NewLocalIdentityFromExpandedKey creates a LocalIdentity from a 64-byte
+// expanded private key (clamped scalar ‖ prefix), the format MeshCore stores
+// and exports as prv.key. The public key is derived from the scalar; the seed
+// is unrecoverable.
+func NewLocalIdentityFromExpandedKey(prv []byte) (LocalIdentity, error) {
+	if len(prv) != ed25519.PrivateKeySize {
+		return LocalIdentity{}, fmt.Errorf("expanded private key must be %d bytes, got %d", ed25519.PrivateKeySize, len(prv))
+	}
+	var li LocalIdentity
+	copy(li.pubKey[:], deriveExpandedPubKey(prv[:32]))
+	li.expanded = bytes.Clone(prv)
+	return li, nil
+}
+
 func localIdentityFromStdKey(pub ed25519.PublicKey, priv ed25519.PrivateKey) LocalIdentity {
 	var li LocalIdentity
 	copy(li.pubKey[:], pub)
 	copy(li.seed[:], priv.Seed())
-	li.privKey = make(ed25519.PrivateKey, ed25519.PrivateKeySize)
-	copy(li.privKey, priv)
 	return li
 }
 
 func (li LocalIdentity) Sign(message []byte) []byte {
-	return ed25519.Sign(li.privKey, message)
+	if li.expanded != nil {
+		return signWithExpandedKey(li.expanded[:32], li.expanded[32:], li.pubKey[:], message)
+	}
+	return ed25519.Sign(ed25519.NewKeyFromSeed(li.seed[:]), message)
 }
 
+// PrivateKey returns the 64-byte Ed25519 private key, or nil for an
+// expanded-key identity, whose seed is unrecoverable. Use Sign or SignWith
+// instead — they work for both kinds.
 func (li LocalIdentity) PrivateKey() ed25519.PrivateKey {
-	key := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
-	copy(key, li.privKey)
-	return key
+	if li.expanded != nil {
+		return nil
+	}
+	return ed25519.NewKeyFromSeed(li.seed[:])
 }
 
 func (li LocalIdentity) Seed() [ed25519.SeedSize]byte {
@@ -172,11 +193,17 @@ func (li LocalIdentity) Seed() [ed25519.SeedSize]byte {
 // and a peer's public identity. This matches MeshCore's
 // LocalIdentity::calcSharedSecret.
 func (li LocalIdentity) SharedSecret(peer Identity) ([]byte, error) {
+	if li.expanded != nil {
+		return sharedSecretFromScalar(li.expanded[:32], peer.pubKey[:])
+	}
 	return DeriveSharedSecret(li.seed[:], peer.pubKey[:])
 }
 
 // X25519PrivateKey converts the Ed25519 seed to an X25519 private key
 // using the RFC 8032 clamping procedure.
 func (li LocalIdentity) X25519PrivateKey() []byte {
+	if li.expanded != nil {
+		return bytes.Clone(li.expanded[:32])
+	}
 	return edPrivateToX25519(li.seed[:])
 }

@@ -3,7 +3,7 @@ module github.com/meshcore-go/meshcore-go/hardware/transport
 go 1.26.1
 
 require (
-	github.com/meshcore-go/meshcore-go v1.0.9
+	github.com/meshcore-go/meshcore-go v1.1.0
 	go.bug.st/serial v1.6.4
 )
 

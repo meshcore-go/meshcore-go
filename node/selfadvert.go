@@ -39,7 +39,7 @@ func (n *Node) sendAdvert() {
 		Timestamp:  uint32(time.Now().Unix()),
 		RawAppData: appBytes,
 	}
-	adv.Sign(id.PrivateKey())
+	adv.SignWith(id)
 
 	payload, err := adv.ToBytes()
 	if err != nil {
