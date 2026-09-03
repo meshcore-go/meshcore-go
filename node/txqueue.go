@@ -22,10 +22,10 @@ type txQueue struct {
 	nextSeq uint64
 }
 
-func newTxQueue(max int) *txQueue {
+func newTxQueue(size int) *txQueue {
 	return &txQueue{
-		entries: make([]txEntry, 0, max),
-		max:     max,
+		entries: make([]txEntry, 0, size),
+		max:     size,
 	}
 }
 
@@ -43,38 +43,33 @@ func (q *txQueue) add(data []byte, priority uint8, scheduledAt time.Time) bool {
 	return true
 }
 
-// peek returns the highest-priority entry whose scheduled time has passed.
-// Returns nil if nothing is ready.
-func (q *txQueue) peek(now time.Time) *txEntry {
-	var best *txEntry
-	bestIdx := -1
+// readyIdx returns the index of the highest-priority ready entry (FIFO within a priority), or -1.
+func (q *txQueue) readyIdx(now time.Time) int {
+	best := -1
 	for i := range q.entries {
 		e := &q.entries[i]
 		if e.scheduledAt.After(now) {
 			continue
 		}
-		if best == nil || e.priority < best.priority || (e.priority == best.priority && e.seq < best.seq) {
-			best = e
-			bestIdx = i
+		if best < 0 || e.priority < q.entries[best].priority ||
+			(e.priority == q.entries[best].priority && e.seq < q.entries[best].seq) {
+			best = i
 		}
 	}
-	_ = bestIdx
 	return best
 }
 
-func (q *txQueue) pop(now time.Time) *txEntry {
-	bestIdx := -1
-	var best *txEntry
-	for i := range q.entries {
-		e := &q.entries[i]
-		if e.scheduledAt.After(now) {
-			continue
-		}
-		if best == nil || e.priority < best.priority || (e.priority == best.priority && e.seq < best.seq) {
-			best = e
-			bestIdx = i
-		}
+// peek returns the highest-priority ready entry, or nil.
+func (q *txQueue) peek(now time.Time) *txEntry {
+	i := q.readyIdx(now)
+	if i < 0 {
+		return nil
 	}
+	return &q.entries[i]
+}
+
+func (q *txQueue) pop(now time.Time) *txEntry {
+	bestIdx := q.readyIdx(now)
 	if bestIdx < 0 {
 		return nil
 	}

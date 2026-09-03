@@ -20,9 +20,9 @@ func TestRetryTracker_ConfirmOnEcho(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
-	var sent int32
+	var sent atomic.Int32
 	sendFn := func(pkt *meshcore.Packet) error {
-		atomic.AddInt32(&sent, 1)
+		sent.Add(1)
 		return nil
 	}
 
@@ -221,31 +221,71 @@ func TestNode_SendGroupText_Failed(t *testing.T) {
 	}
 }
 
-func TestNode_SendGroupText_NotMarkedAsSeen(t *testing.T) {
+// The echo of our own group text confirms the tracker but is neither re-flooded nor delivered.
+func TestNode_SendGroupText_EchoNotForwardedOrDelivered(t *testing.T) {
 	radio := &mockRadio{}
-	ch := testChannel("not-seen")
-	n := New(seedIdentity(0xE2), radio, WithChannels(ch))
+	ch := testChannel("echo")
+	n := New(seedIdentity(0xE2), radio, WithChannels(ch),
+		WithAllowForwardHandler(func(*meshcore.Packet) bool { return true }))
 	defer n.Stop()
 
-	err := n.SendGroupText(ch, testGroupPayload("test"), 1, time.Second, 3, nil)
+	delivered := 0
+	n.OnPacket(meshcore.PayloadTypeGrpTxt, func(*meshcore.Packet) { delivered++ })
+
+	var confirmed atomic.Int32
+	err := n.SendGroupText(ch, testGroupPayload("test"), 1, time.Second, 3, func(r GroupSendResult) {
+		if r.Confirmed {
+			confirmed.Add(1)
+		}
+	})
 	if err != nil {
 		t.Fatalf("SendGroupText error: %v", err)
 	}
-
 	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
-	if len(sent) == 0 {
-		t.Fatal("expected packet to be sent")
+	if len(sent) != 1 {
+		t.Fatalf("sent %d packets, want 1", len(sent))
+	}
+	pkt, _ := meshcore.PacketFromBytes(sent[0])
+	if !n.router.dedup.HasSeen(pkt) {
+		t.Error("own group text should be marked seen at send time")
 	}
 
-	// The packet should NOT be in the dedup cache (not marked as seen)
-	pkt, _ := meshcore.PacketFromBytes(sent[0])
+	// Echo: once via the tracker, once more after it has been confirmed.
+	radio.inject(sent[0])
+	radio.inject(sent[0])
+	time.Sleep(200 * time.Millisecond)
 
-	// HasSeen records AND checks — if not previously marked, it returns false
-	// Since we didn't MarkSeen, this should return false (first time seeing it)
-	if n.router.dedup.HasSeen(pkt) {
-		t.Error("packet should not have been marked as seen before echo")
+	if confirmed.Load() != 1 {
+		t.Errorf("confirmed %d times, want 1", confirmed.Load())
+	}
+	if delivered != 0 {
+		t.Errorf("echo delivered to local handlers %d times, want 0", delivered)
+	}
+	if got := len(radio.sentData()); got != 1 {
+		t.Errorf("sent %d packets after echo, want 1 (echo must not be re-flooded)", got)
+	}
+}
+
+func TestTextAckHashInput_ExcludesAttemptTail(t *testing.T) {
+	self := seedIdentity(0xE3)
+	ts := time.Unix(1700000000, 0)
+	text := []byte("hello")
+
+	p4 := meshcore.BuildTextPlaintextWithAttempt(ts, 0, text, 4)
+	if len(p4) != 5+len(text)+2 {
+		t.Fatalf("attempt-4 plaintext len = %d, want %d", len(p4), 5+len(text)+2)
+	}
+	receiverView := meshcore.BuildTextPlaintextWithAttempt(ts, 0, text, 0)
+
+	want := meshcore.CalcAckHash(receiverView, self.PublicKeyBytes())
+	got := meshcore.CalcAckHash(textAckHashInput(p4, len(text)), self.PublicKeyBytes())
+	if got != want {
+		t.Fatalf("attempt-4 ACK CRC = %08x, want %08x", got, want)
+	}
+	if meshcore.CalcAckHash(p4, self.PublicKeyBytes()) == want {
+		t.Fatal("hashing the full tailed plaintext should differ; test is vacuous")
 	}
 }
 

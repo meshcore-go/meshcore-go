@@ -201,6 +201,26 @@ func TestMux_CloseDetachesVirtualRadio(t *testing.T) {
 	}
 }
 
+func TestMux_StopDetachesFromModem(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	radio := mux.NewRadio()
+
+	delivered := 0
+	radio.SetDataHandler(func(*meshcore.Packet) { delivered++ })
+
+	mux.Stop()
+	mux.Stop() // idempotent
+
+	if modem.dataH != nil {
+		t.Fatal("Stop should detach the mux data handler from the modem")
+	}
+	modem.inject(muxFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{0x01}))
+	if delivered != 0 {
+		t.Fatalf("delivered %d packets after Stop, want 0", delivered)
+	}
+}
+
 func TestMux_InvalidPacketSilentlyDropped(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)

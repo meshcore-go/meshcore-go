@@ -48,9 +48,9 @@ type txEngineConfig struct {
 
 type txEngineOption func(*txEngineConfig)
 
-func withTxMaxQueue(max int) txEngineOption {
+func withTxMaxQueue(size int) txEngineOption {
 	return func(c *txEngineConfig) {
-		c.maxQueue = max
+		c.maxQueue = size
 	}
 }
 

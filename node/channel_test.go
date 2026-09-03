@@ -281,6 +281,27 @@ func TestNode_WithChannelsOverflow(t *testing.T) {
 	}
 }
 
+func TestNode_WithChannels_OrderIndependent(t *testing.T) {
+	ch0 := testChannel("order0")
+	ch1 := testChannel("order1")
+	orders := map[string][]Option{
+		"channels before max": {WithChannels(ch0, ch1), WithMaxChannels(4)},
+		"channels after max":  {WithMaxChannels(4), WithChannels(ch0, ch1)},
+	}
+	for name, opts := range orders {
+		t.Run(name, func(t *testing.T) {
+			n := New(seedIdentity(0xC6), &mockRadio{}, opts...)
+			defer n.Stop()
+			if n.channels.maxChannels() != 4 {
+				t.Errorf("maxChannels = %d, want 4", n.channels.maxChannels())
+			}
+			if n.Channel(0) != ch0 || n.Channel(1) != ch1 {
+				t.Error("channels lost; option order should not matter")
+			}
+		})
+	}
+}
+
 func makeGroupTextPacket(t *testing.T, ch *meshcore.ChannelEntry, sender, text string) *meshcore.Packet {
 	t.Helper()
 	payload := &meshcore.GroupTextPayload{

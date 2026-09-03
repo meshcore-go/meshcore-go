@@ -89,6 +89,7 @@ func (rt *retryTracker) sweep() {
 
 	rt.mu.Lock()
 	var expired []*pendingRetry
+	var resend []*meshcore.Packet
 	for hash, p := range rt.pending {
 		if now.After(p.deadline) {
 			p.retries++
@@ -97,12 +98,15 @@ func (rt *retryTracker) sweep() {
 				delete(rt.pending, hash)
 			} else {
 				p.deadline = now.Add(p.timeout)
-				_ = rt.sendFn(p.pkt)
+				resend = append(resend, p.pkt)
 			}
 		}
 	}
 	rt.mu.Unlock()
 
+	for _, pkt := range resend {
+		_ = rt.sendFn(pkt)
+	}
 	for _, p := range expired {
 		if p.onFail != nil {
 			p.onFail()

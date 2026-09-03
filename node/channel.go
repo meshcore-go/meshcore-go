@@ -15,13 +15,14 @@ var (
 // DefaultMaxChannels is the default upper bound on channel slots.
 const DefaultMaxChannels = 50
 
+// channelTable stores entries by pointer and never mutates them; treat an entry as immutable once set.
 type channelTable struct {
 	mu       sync.RWMutex
 	channels []*meshcore.ChannelEntry
 }
 
-func newChannelTable(maxChannels int) channelTable {
-	return channelTable{
+func newChannelTable(maxChannels int) *channelTable {
+	return &channelTable{
 		channels: make([]*meshcore.ChannelEntry, maxChannels),
 	}
 }

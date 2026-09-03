@@ -33,7 +33,7 @@ func (n *Node) sendAdvert() {
 		return
 	}
 
-	id := n.getIdentity()
+	id := n.Identity()
 	adv := &meshcore.Advert{
 		PublicKey:  id.Identity,
 		Timestamp:  uint32(time.Now().Unix()),
