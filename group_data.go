@@ -1,9 +1,6 @@
 package meshcore
 
-import (
-	"bytes"
-	"fmt"
-)
+import "fmt"
 
 type GroupData struct {
 	ChannelHash      byte
@@ -12,66 +9,25 @@ type GroupData struct {
 }
 
 func GroupDataFromBytes(data []byte) (*GroupData, error) {
-	buffer := bytes.NewBuffer(data)
-
-	channelHash, err := buffer.ReadByte()
-	if err != nil {
-		return nil, err
+	if len(data) < 3 {
+		return nil, fmt.Errorf("%w: group data needs 3 header bytes, have %d", ErrTooShort, len(data))
 	}
-
-	var mac [2]byte
-	n, macErr := buffer.Read(mac[:])
-	if macErr != nil || n != 2 {
-		if macErr != nil {
-			return nil, macErr
-		}
-		return nil, fmt.Errorf("MAC read: expected 2 bytes, got %d", n)
-	}
-
-	encryptedPayload := buffer.Bytes()
-
 	return &GroupData{
-		ChannelHash:      channelHash,
-		MAC:              mac,
-		EncryptedPayload: encryptedPayload,
+		ChannelHash:      data[0],
+		MAC:              [2]byte{data[1], data[2]},
+		EncryptedPayload: data[3:],
 	}, nil
 }
 
 func (g *GroupData) ToBytes() ([]byte, error) {
-	buffer := bytes.Buffer{}
-
-	err := buffer.WriteByte(g.ChannelHash)
-	if err != nil {
-		return nil, err
-	}
-
-	_, macErr := buffer.Write(g.MAC[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	_, payloadErr := buffer.Write(g.EncryptedPayload)
-	if payloadErr != nil {
-		return nil, payloadErr
-	}
-
-	return buffer.Bytes(), nil
+	return append([]byte{g.ChannelHash, g.MAC[0], g.MAC[1]}, g.EncryptedPayload...), nil
 }
 
 func (g *GroupData) VerifyMAC(channelKey []byte) bool {
-	src := make([]byte, cipherMACSize+len(g.EncryptedPayload))
-	copy(src[:cipherMACSize], g.MAC[:])
-	copy(src[cipherMACSize:], g.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(channelKey, src)
-	return result != nil
+	return g.Decrypt(channelKey) != nil
 }
 
+// Decrypt returns the plaintext, or nil if the MAC does not verify.
 func (g *GroupData) Decrypt(channelKey []byte) []byte {
-	src := make([]byte, cipherMACSize+len(g.EncryptedPayload))
-	copy(src[:cipherMACSize], g.MAC[:])
-	copy(src[cipherMACSize:], g.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(channelKey, src)
-	return result
+	return macDecrypt(channelKey, g.MAC, g.EncryptedPayload)
 }

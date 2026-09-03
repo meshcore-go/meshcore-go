@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -589,4 +590,147 @@ func hexIdentity(t *testing.T, s string) Identity {
 		t.Fatalf("bad identity hex %q: %v", s, err)
 	}
 	return id
+}
+
+func TestAdvertAppDataToBytesTruncatesName(t *testing.T) {
+	name := ""
+	for range 16 {
+		name += "é"
+	}
+	got, err := (&AdvertAppData{Type: "CHAT", Name: name}).ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 31 || string(got[1:]) != name[:30] {
+		t.Errorf("len %d name %q", len(got), got[1:])
+	}
+
+	got, err = (&AdvertAppData{Type: "CHAT", Lat: 1, Lon: 1, Name: "1234567890123456789🙂🙂"}).ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1+8+23 || string(got[9:]) != "1234567890123456789🙂" || got[0]&AdvertNameMask == 0 {
+		t.Errorf("len %d flags %02x name %q", len(got), got[0], got[9:])
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		max      int
+		expected string
+	}{
+		{name: "fits", input: "abc", max: 5, expected: "abc"},
+		{name: "ascii cut", input: "abc", max: 2, expected: "ab"},
+		{name: "cut inside rune drops it", input: "aé", max: 2, expected: "a"},
+		{name: "cut on rune boundary", input: "aé", max: 3, expected: "aé"},
+		{name: "single rune too wide", input: "🙂", max: 3, expected: ""},
+		{name: "negative max", input: "abc", max: -1, expected: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TruncateUTF8(tt.input, tt.max); got != tt.expected {
+				t.Errorf("TruncateUTF8(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAdvertAppData_HasLocation(t *testing.T) {
+	b, err := (&AdvertAppData{Type: "CHAT", Name: "n"}).ToBytes()
+	if err != nil || b[0]&AdvertLatLonMask != 0 {
+		t.Fatalf("flags 0x%02x err %v, want no LATLON", b[0], err)
+	}
+	b, err = (&AdvertAppData{Type: "CHAT", Name: "n", HasLocation: true}).ToBytes()
+	if err != nil || b[0]&AdvertLatLonMask == 0 || len(b) != 1+8+1 {
+		t.Fatalf("flags 0x%02x len %d err %v, want LATLON with 8 zero bytes", b[0], len(b), err)
+	}
+	ad, err := AdvertAppDataFromBytes(b)
+	if err != nil || !ad.HasLocation || ad.Lat != 0 || ad.Lon != 0 {
+		t.Fatalf("decoded %+v err %v", ad, err)
+	}
+	back, _ := ad.ToBytes()
+	if !bytes.Equal(back, b) {
+		t.Fatalf("round trip %x != %x", back, b)
+	}
+	ad, _ = AdvertAppDataFromBytes(hexDecode(t, "9204F8C4FD4D4F7C0AF09F92A54645524755532054524947"))
+	if !ad.HasLocation || ad.Lat == 0 {
+		t.Fatalf("captured advert decoded %+v", ad)
+	}
+}
+
+func TestAdvertSignWith(t *testing.T) {
+	var seed [ed25519.SeedSize]byte
+	copy(seed[:], hexDecode(t, "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"))
+	ids := map[string]LocalIdentity{"seed": NewLocalIdentityFromSeed(seed)}
+	exp, err := NewLocalIdentityFromExpandedKey(hexDecode(t, fwTestPrv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids["expanded"] = exp
+
+	for name, id := range ids {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := (&AdvertAppData{Type: "REPEATER", Name: "rpt", Lat: 1, Lon: -1}).ToBytes()
+			adv := &Advert{PublicKey: id.Identity, Timestamp: 1700000000, RawAppData: raw}
+			adv.SignWith(id)
+			if len(adv.Signature) != SignatureSize || !adv.Verify() {
+				t.Fatal("SignWith() signature does not verify")
+			}
+			if priv := id.PrivateKey(); priv != nil {
+				want := ed25519.Sign(priv, adv.signedData())
+				if !bytes.Equal(want, adv.Signature) {
+					t.Fatal("SignWith() differs from Sign() for a seed identity")
+				}
+			}
+			adv.Timestamp++
+			if adv.Verify() {
+				t.Fatal("Verify() passed after mutating the signed timestamp")
+			}
+		})
+	}
+}
+
+func FuzzAdvertFromBytes(f *testing.F) {
+	for _, h := range []string{
+		"D7B4B39CCF9F10D3B0D0597C0E5F0D5886B8DF23C7F8AD0CC702F932B9A3BA86C0A4C369C3CE366496C4C607A8DFBAA80B0ED295B67222F55D6AC91EEEE6F38ED5F07A741B80A58B565DCA0263EBF2431D0528F57822EA5D2E0F6737CEE22F23D19D95069204F8C4FD4D4F7C0AF09F92A54645524755532054524947",
+		"49A10AA4BF939B21052B3216C571A9D6D49BEC3BCD54F716778AF1A3D06BD7BF9A1AC269B1396C0F2D9C9A3B038A170F01E3E5A40DEDC0A7C7FF2AA1C34CD41917AABBE28E52A82D5A0A8EBB98E693BAA2D380EDD16CCDFB02B72F12FFE599FE5F77ED0281F09F8F8DEFB88F484C5A204F62732031202D204C6574734D657368203162",
+		"", "00",
+		// flags 0xF0: latlon, feat1, feat2 and name set, with feat2 zero-valued
+		strings.Repeat("30", 100) + "f0" + strings.Repeat("30", 10) + "0000" + "30",
+	} {
+		b, _ := hex.DecodeString(h)
+		f.Add(b)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		adv, err := AdvertFromBytes(data)
+		if err != nil {
+			return
+		}
+		_ = adv.Verify()
+		_ = adv.TypeString()
+		out, err := adv.ToBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out, data) {
+			t.Fatalf("round trip mismatch:\n in  %x\n out %x", data, out)
+		}
+		ad := adv.AppData()
+		if ad.Type == "" || len(adv.RawAppData) == 0 {
+			return
+		}
+		raw, err := ad.ToBytes()
+		if err != nil {
+			t.Fatalf("re-encode: %v", err)
+		}
+		again, err := AdvertAppDataFromBytes(raw)
+		if err != nil {
+			t.Fatalf("re-decode %x: %v", raw, err)
+		}
+		if !reflect.DeepEqual(*again, ad) {
+			t.Fatalf("app data drift:\n raw   %x -> %+v\n again %x -> %+v", adv.RawAppData, ad, raw, *again)
+		}
+	})
 }

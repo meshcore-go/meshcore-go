@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -321,5 +322,11 @@ func TestAnonReqRoundTrip(t *testing.T) {
 	gotTrimmed := strings.TrimRight(string(got), "\x00")
 	if gotTrimmed != string(plaintext) {
 		t.Errorf("Decrypt() = %q, want %q", gotTrimmed, plaintext)
+	}
+}
+
+func TestAnonReqFromBytes_ShortIsErrTooShort(t *testing.T) {
+	if _, err := AnonReqFromBytes(make([]byte, 34)); !errors.Is(err, ErrTooShort) {
+		t.Fatalf("error = %v, want ErrTooShort", err)
 	}
 }

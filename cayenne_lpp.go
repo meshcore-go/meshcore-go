@@ -92,7 +92,7 @@ var polylineValueMap = map[byte]float64{
 type LPPReading struct {
 	Channel byte
 	Type    byte
-	Value   interface{}
+	Value   any
 }
 
 type LPPGPSValue struct {
@@ -135,11 +135,7 @@ type LPPPolylineValue struct {
 func LPPDecode(data []byte) ([]LPPReading, error) {
 	readings := make([]LPPReading, 0)
 
-	for i := 0; i < len(data); {
-		if len(data)-i < 2 {
-			return nil, fmt.Errorf("truncated lpp header: need 2 bytes, have %d", len(data)-i)
-		}
-
+	for i := 0; i+2 < len(data); {
 		channel := data[i]
 		typ := data[i+1]
 		i += 2
@@ -538,11 +534,7 @@ func decodePolyline(buf []byte) LPPPolylineValue {
 	}
 
 	// One coordinate per delta byte (buf[8:]) plus the initial point.
-	coordCap := len(buf) - 7
-	if coordCap < 1 {
-		coordCap = 1
-	}
-	out.Coordinates = make([]LPPCoordinate, 0, coordCap)
+	out.Coordinates = make([]LPPCoordinate, 0, max(len(buf)-7, 1))
 
 	// The initial lat/lon are signed 24-bit big-endian values (same layout as
 	// decodeInt24), scaled by the factor.

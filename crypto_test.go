@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -451,8 +452,8 @@ func TestMACThenDecrypt(t *testing.T) {
 		}
 
 		decrypted, err := MACThenDecrypt(wrongKey, encrypted)
-		if err != nil {
-			t.Fatalf("MACThenDecrypt should not error on MAC mismatch: %v", err)
+		if !errors.Is(err, ErrBadMAC) {
+			t.Fatalf("MACThenDecrypt error = %v, want ErrBadMAC", err)
 		}
 		if decrypted != nil {
 			t.Error("expected nil for wrong key, got data")
@@ -461,8 +462,8 @@ func TestMACThenDecrypt(t *testing.T) {
 
 	t.Run("too short input returns error", func(t *testing.T) {
 		_, err := MACThenDecrypt(key, []byte{0x00})
-		if err == nil {
-			t.Fatal("expected error for 1 byte input, got nil")
+		if !errors.Is(err, ErrTooShort) {
+			t.Fatalf("error = %v, want ErrTooShort", err)
 		}
 		if !strings.Contains(err.Error(), "data too short") {
 			t.Errorf("unexpected error: %v", err)
@@ -492,8 +493,8 @@ func TestMACThenDecrypt(t *testing.T) {
 		tampered[cipherMACSize] ^= 0xFF
 
 		decrypted, err := MACThenDecrypt(key, tampered)
-		if err != nil {
-			t.Fatalf("MACThenDecrypt should not error on tampered data: %v", err)
+		if !errors.Is(err, ErrBadMAC) {
+			t.Fatalf("MACThenDecrypt error = %v, want ErrBadMAC", err)
 		}
 		if decrypted != nil {
 			t.Error("expected nil for tampered ciphertext, got data")
@@ -513,8 +514,8 @@ func TestMACThenDecrypt(t *testing.T) {
 		tampered[0] ^= 0xFF
 
 		decrypted, err := MACThenDecrypt(key, tampered)
-		if err != nil {
-			t.Fatalf("MACThenDecrypt should not error on tampered MAC: %v", err)
+		if !errors.Is(err, ErrBadMAC) {
+			t.Fatalf("MACThenDecrypt error = %v, want ErrBadMAC", err)
 		}
 		if decrypted != nil {
 			t.Error("expected nil for tampered MAC, got data")
@@ -560,5 +561,94 @@ func TestEncryptDecryptFullPipeline(t *testing.T) {
 	trimmed := bytes.TrimRight(decrypted, "\x00")
 	if !bytes.Equal(trimmed, plaintext) {
 		t.Errorf("decrypted = %q, want %q", trimmed, plaintext)
+	}
+}
+
+func TestAES_FIPS197_Vector(t *testing.T) {
+	secret := hexDecode(t, "000102030405060708090a0b0c0d0e0f"+"ffffffffffffffffffffffffffffffff")
+	pt := hexDecode(t, "00112233445566778899aabbccddeeff")
+	want := hexDecode(t, "69c4e0d86a7b0430d8cdb78070b4c55a")
+
+	ct, err := Encrypt(secret, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ct, want) {
+		t.Fatalf("Encrypt() = %x, want %x", ct, want)
+	}
+	back, err := Decrypt(secret, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(back, pt) {
+		t.Fatalf("Decrypt() = %x, want %x", back, pt)
+	}
+	ct2, _ := Encrypt(secret, append(append([]byte{}, pt...), pt...))
+	if !bytes.Equal(ct2, append(append([]byte{}, want...), want...)) {
+		t.Fatalf("ECB two-block Encrypt() = %x", ct2)
+	}
+	padded, _ := Encrypt(secret, pt[:5])
+	ref, _ := Encrypt(secret, append(pt[:5], make([]byte, 11)...))
+	if !bytes.Equal(padded, ref) {
+		t.Fatal("partial block is not zero-padded")
+	}
+}
+
+func TestEncryptedPayloads_RejectShortMAC(t *testing.T) {
+	eph := bytes.Repeat([]byte{0x11}, PubKeySize)
+	cases := []struct {
+		name string
+		in   []byte
+		call func([]byte) error
+	}{
+		{"text message", []byte{1, 2, 3}, func(b []byte) error { _, err := TextMessageFromBytes(b); return err }},
+		{"request", []byte{1, 2, 3}, func(b []byte) error { _, err := RequestFromBytes(b); return err }},
+		{"response", []byte{1, 2, 3}, func(b []byte) error { _, err := ResponseFromBytes(b); return err }},
+		{"path", []byte{1, 2, 3}, func(b []byte) error { _, err := PathFromBytes(b); return err }},
+		{"group text", []byte{1, 2}, func(b []byte) error { _, err := GroupTextFromBytes(b); return err }},
+		{"group data", []byte{1, 2}, func(b []byte) error { _, err := GroupDataFromBytes(b); return err }},
+		{"anon req", append(append([]byte{1}, eph...), 2), func(b []byte) error { _, err := AnonReqFromBytes(b); return err }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call(c.in)
+			if !errors.Is(err, ErrTooShort) {
+				t.Fatalf("%d-byte input: error = %v, want ErrTooShort", len(c.in), err)
+			}
+			if err := c.call(append(c.in, 0xAA)); err != nil {
+				t.Fatalf("full header rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestEncryptedPayloads_BadMACContract(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	enc, err := EncryptThenMAC(key, []byte{0x01, 0xAA, PayloadTypeAck, 1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := [2]byte{enc[0] ^ 0xFF, enc[1]}
+	wrong := bytes.Repeat([]byte{8}, 32)
+
+	tm := &TextMessage{MAC: mac, EncryptedPayload: enc[2:]}
+	if tm.Decrypt(key) != nil || tm.VerifyMAC(key) {
+		t.Error("TextMessage accepted tampered MAC")
+	}
+	tm.MAC = [2]byte{enc[0], enc[1]}
+	if tm.Decrypt(wrong) != nil || tm.Decrypt(key) == nil {
+		t.Error("TextMessage Decrypt wrong-key/right-key contract broken")
+	}
+
+	p := &Path{MAC: mac, EncryptedPayload: enc[2:]}
+	if _, err := p.DecryptStruct(key); !errors.Is(err, ErrBadMAC) {
+		t.Errorf("Path.DecryptStruct error = %v, want ErrBadMAC", err)
+	}
+	g := &GroupText{MAC: mac, EncryptedPayload: enc[2:]}
+	if _, err := g.DecryptStruct(key); !errors.Is(err, ErrBadMAC) {
+		t.Errorf("GroupText.DecryptStruct error = %v, want ErrBadMAC", err)
+	}
+	if _, err := (&GroupText{}).DecryptStruct(key); !errors.Is(err, ErrTooShort) {
+		t.Errorf("empty GroupText.DecryptStruct error = %v, want ErrTooShort", err)
 	}
 }

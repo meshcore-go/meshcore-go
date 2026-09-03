@@ -1,6 +1,8 @@
 package meshcore
 
 import (
+	"bytes"
+	"encoding/hex"
 	"testing"
 )
 
@@ -73,7 +75,7 @@ func TestRegionKey_CalcTransportCode_DifferentKeys(t *testing.T) {
 func TestRegionKey_CalcTransportCode_NotReserved(t *testing.T) {
 	// Run many iterations — codes 0x0000 and 0xFFFF should never appear.
 	key := DeriveRegionKey("#test-reserved")
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		payload := []byte{byte(i >> 8), byte(i)}
 		code := key.CalcTransportCode(PayloadTypeTxtMsg, payload)
 		if code == 0x0000 {
@@ -177,5 +179,38 @@ func TestIsValidRegionNameChar(t *testing.T) {
 		if IsValidRegionNameChar(c) {
 			t.Errorf("expected %q to be invalid", c)
 		}
+	}
+}
+
+func TestRegionKey_CalcTransportCode_Vectors(t *testing.T) {
+	key := DeriveRegionKey("#nz")
+	if got := hex.EncodeToString(key[:]); got != "eb87ee8817ba71315ac7be9c733b523a" {
+		t.Fatalf("DeriveRegionKey(#nz) = %s", got)
+	}
+	cases := []struct {
+		payload string
+		want    uint16
+	}{
+		{"010203", 0x38ab},
+		{"00c5ec", 0x0001},
+		{"01b654", 0xfffe},
+	}
+	for _, c := range cases {
+		p, _ := hex.DecodeString(c.payload)
+		if got := key.CalcTransportCode(PayloadTypeTxtMsg, p); got != c.want {
+			t.Errorf("CalcTransportCode(%s) = 0x%04x, want 0x%04x", c.payload, got, c.want)
+		}
+	}
+}
+
+func TestNewRegionFromKey(t *testing.T) {
+	var key RegionKey
+	copy(key[:], bytes.Repeat([]byte{0xA5}, RegionKeySize))
+	r := NewRegionFromKey("$private", key)
+	if r.Name != "$private" || r.Key != key || r.ID != 0 || r.Parent != 0 || r.Flags != 0 {
+		t.Fatalf("NewRegionFromKey() = %+v", r)
+	}
+	if r.Key == DeriveRegionKey("$private") {
+		t.Fatal("NewRegionFromKey re-derived the key from the name")
 	}
 }

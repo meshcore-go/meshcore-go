@@ -1,6 +1,6 @@
 package meshcore
 
-import "bytes"
+import "fmt"
 
 type Path struct {
 	Destination      byte
@@ -10,74 +10,68 @@ type Path struct {
 }
 
 func PathFromBytes(data []byte) (*Path, error) {
-	buffer := bytes.NewBuffer(data)
-
-	dest, destErr := buffer.ReadByte()
-	if destErr != nil {
-		return nil, destErr
+	if len(data) < 4 {
+		return nil, fmt.Errorf("%w: path needs 4 header bytes, have %d", ErrTooShort, len(data))
 	}
-
-	src, srcErr := buffer.ReadByte()
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	var mac [2]byte
-	_, macErr := buffer.Read(mac[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	cipherBytes := buffer.Bytes()
-
 	return &Path{
-		Destination:      dest,
-		Source:           src,
-		MAC:              mac,
-		EncryptedPayload: cipherBytes,
+		Destination:      data[0],
+		Source:           data[1],
+		MAC:              [2]byte{data[2], data[3]},
+		EncryptedPayload: data[4:],
 	}, nil
 }
 
 func (p *Path) ToBytes() ([]byte, error) {
-	buffer := bytes.Buffer{}
-
-	destErr := buffer.WriteByte(p.Destination)
-	if destErr != nil {
-		return nil, destErr
-	}
-
-	srcErr := buffer.WriteByte(p.Source)
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	_, macErr := buffer.Write(p.MAC[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	_, payloadErr := buffer.Write(p.EncryptedPayload)
-	if payloadErr != nil {
-		return nil, payloadErr
-	}
-
-	return buffer.Bytes(), nil
+	return append([]byte{p.Destination, p.Source, p.MAC[0], p.MAC[1]}, p.EncryptedPayload...), nil
 }
 
 func (p *Path) VerifyMAC(sharedSecret []byte) bool {
-	src := make([]byte, cipherMACSize+len(p.EncryptedPayload))
-	copy(src[:cipherMACSize], p.MAC[:])
-	copy(src[cipherMACSize:], p.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result != nil
+	return p.Decrypt(sharedSecret) != nil
 }
 
+// Decrypt returns the plaintext, or nil if the MAC does not verify.
 func (p *Path) Decrypt(sharedSecret []byte) []byte {
-	src := make([]byte, cipherMACSize+len(p.EncryptedPayload))
-	copy(src[:cipherMACSize], p.MAC[:])
-	copy(src[cipherMACSize:], p.EncryptedPayload)
+	return macDecrypt(sharedSecret, p.MAC, p.EncryptedPayload)
+}
 
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result
+// PathPayload is the decrypted body of a PATH (returned path) packet.
+type PathPayload struct {
+	PathLength byte   // raw path_len byte: bits 6-7 = hash size - 1, bits 0-5 = hop count
+	Path       []byte // hop hashes, PathHashCount()*PathHashSize() bytes
+	ExtraType  byte   // bundled payload type (lower 4 bits), e.g. PayloadTypeAck
+	Extra      []byte // bundled payload; may be zero-padded to the cipher block
+}
+
+func (p *PathPayload) PathHashSize() uint8  { s, _ := pathLenFields(p.PathLength); return s }
+func (p *PathPayload) PathHashCount() uint8 { _, c := pathLenFields(p.PathLength); return c }
+func (p *PathPayload) PathHashes() [][]byte {
+	return splitPathHashes(p.Path, p.PathHashSize(), p.PathHashCount())
+}
+
+// DecryptStruct decrypts and parses the PATH body.
+func (p *Path) DecryptStruct(sharedSecret []byte) (*PathPayload, error) {
+	plain, err := macDecryptErr(sharedSecret, p.MAC, p.EncryptedPayload)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting path: %w", err)
+	}
+	return ParsePathPayload(plain)
+}
+
+// ParsePathPayload decodes the plaintext returned by Path.Decrypt.
+func ParsePathPayload(plain []byte) (*PathPayload, error) {
+	if len(plain) < 2 {
+		return nil, fmt.Errorf("path payload too short: %d bytes", len(plain))
+	}
+	p := &PathPayload{PathLength: plain[0]}
+	if !IsValidPathLen(p.PathLength) {
+		return nil, fmt.Errorf("path payload: bad path_len 0x%02x", p.PathLength)
+	}
+	n := int(p.PathHashCount()) * int(p.PathHashSize())
+	if len(plain) < 1+n+1 {
+		return nil, fmt.Errorf("path payload: %d hop bytes exceed %d available", n, len(plain)-2)
+	}
+	p.Path = plain[1 : 1+n]
+	p.ExtraType = plain[1+n] & PacketTypeMask
+	p.Extra = plain[2+n:]
+	return p, nil
 }

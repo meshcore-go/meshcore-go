@@ -49,7 +49,8 @@ func TestLPPDecode(t *testing.T) {
 		{name: "polyline mid payload", hex: "016700C805F009E3002710004E20E30374014A", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 20.0}, {Channel: 5, Type: LPPPolyline, Value: LPPPolylineValue{Factor: 227, Coordinates: []LPPCoordinate{{Latitude: 1.0, Longitude: 2.0}, {Latitude: 1.0003, Longitude: 1.9998}}}}, {Channel: 3, Type: LPPVoltage, Value: 3.3}}},
 		{name: "polyline bad size", hex: "05F005E300271000", wantErr: true},
 		{name: "truncated input", hex: "016700", wantErr: true},
-		{name: "truncated header", hex: "01", wantErr: true},
+		{name: "partial header is end of data", hex: "01", want: []LPPReading{}},
+		{name: "dangling header is end of data", hex: "016700C8" + "0268", want: []LPPReading{{Channel: 1, Type: LPPTemperature, Value: 20.0}}},
 		{name: "unknown type", hex: "01FF00", wantErr: true},
 	}
 
@@ -396,4 +397,89 @@ func assertReadingEqual(t *testing.T, got, want LPPReading) {
 	default:
 		t.Fatalf("unsupported want value type %T", want.Value)
 	}
+}
+
+func TestLPPPolyline_ExtendedDelta(t *testing.T) {
+	e := NewLPPEncoder()
+	coords := []LPPCoordinate{{Latitude: 10, Longitude: 20}, {Latitude: 15, Longitude: 25}}
+	for _, simp := range []LPPSimplification{LPPSimplifyNone, LPPSimplifyPerpendicularDistance} {
+		e.Reset()
+		if err := e.AddPolyline(1, coords, LPPPrec0_0001, simp); err != nil {
+			t.Fatalf("simplification %d: %v", simp, err)
+		}
+		b := e.Bytes()
+		if len(b) > lppDefaultMaxSize || int(b[2]) != len(b)-2 {
+			t.Fatalf("simplification %d: len %d, size byte %d", simp, len(b), b[2])
+		}
+		rs, err := LPPDecode(b)
+		if err != nil || len(rs) != 1 {
+			t.Fatalf("decode: %v (%d readings)", err, len(rs))
+		}
+		pl := rs[0].Value.(LPPPolylineValue)
+		if pl.Factor != byte(LPPPrec0_0001) || len(pl.Coordinates) != len(b)-2-7 {
+			t.Fatalf("factor %d, %d coords for %d delta bytes", pl.Factor, len(pl.Coordinates), len(b)-2-8)
+		}
+		if pl.Coordinates[0] != (LPPCoordinate{Latitude: 10, Longitude: 20}) {
+			t.Fatalf("first coord %+v", pl.Coordinates[0])
+		}
+		for i := 1; i < len(pl.Coordinates); i++ {
+			dLat := pl.Coordinates[i].Latitude - pl.Coordinates[i-1].Latitude
+			dLon := pl.Coordinates[i].Longitude - pl.Coordinates[i-1].Longitude
+			if dLat <= 0 || dLat > 0.00071 || dLon <= 0 || dLon > 0.00071 {
+				t.Fatalf("step %d: dLat %g dLon %g", i, dLat, dLon)
+			}
+		}
+	}
+}
+
+func TestLPPPolyline_PerpendicularDistanceMerge(t *testing.T) {
+	coords := []LPPCoordinate{
+		{Latitude: 1.0000, Longitude: 2.0000},
+		{Latitude: 1.0002, Longitude: 2.0002},
+		{Latitude: 1.0004, Longitude: 2.0004},
+		{Latitude: 1.0006, Longitude: 2.0006},
+	}
+	plain, merged := NewLPPEncoder(), NewLPPEncoder()
+	if err := plain.AddPolyline(1, coords, LPPPrec0_0001, LPPSimplifyNone); err != nil {
+		t.Fatal(err)
+	}
+	if err := merged.AddPolyline(1, coords, LPPPrec0_0001, LPPSimplifyPerpendicularDistance); err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Bytes()) != 2+8+3 || len(merged.Bytes()) != 2+8+1 {
+		t.Fatalf("plain %d bytes, merged %d bytes", len(plain.Bytes()), len(merged.Bytes()))
+	}
+	rs, err := LPPDecode(merged.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := rs[0].Value.(LPPPolylineValue)
+	last := pl.Coordinates[len(pl.Coordinates)-1]
+	if math.Abs(last.Latitude-1.0006) > 1e-9 || math.Abs(last.Longitude-2.0006) > 1e-9 {
+		t.Fatalf("merged end point %+v", last)
+	}
+}
+
+func FuzzLPPDecode(f *testing.F) {
+	for _, h := range []string{
+		"016700C80268640374014A", "05F009E3002710004E20E3", "0188003039FFA460003039",
+		"016700C805F009E3002710004E20E30374014A", "05F005E300271000", "01FF00", "",
+	} {
+		b, _ := hex.DecodeString(h)
+		f.Add(b)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		rs, err := LPPDecode(data)
+		if err != nil {
+			return
+		}
+		for _, r := range rs {
+			if r.Channel == 0 {
+				t.Fatal("channel 0 is the end marker and must not be returned")
+			}
+			if pl, ok := r.Value.(LPPPolylineValue); ok && r.Type != LPPPolyline {
+				t.Fatalf("polyline value on type %d: %+v", r.Type, pl)
+			}
+		}
+	})
 }

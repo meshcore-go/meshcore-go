@@ -22,65 +22,27 @@ type GroupText struct {
 }
 
 func GroupTextFromBytes(data []byte) (*GroupText, error) {
-	buffer := bytes.NewBuffer(data)
-
-	channelHash, err := buffer.ReadByte()
-	if err != nil {
-		return nil, err
+	if len(data) < 3 {
+		return nil, fmt.Errorf("%w: group text needs 3 header bytes, have %d", ErrTooShort, len(data))
 	}
-
-	var mac [2]byte
-	_, macErr := buffer.Read(mac[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	encryptedPayload := buffer.Bytes()
-
 	return &GroupText{
-		ChannelHash:      channelHash,
-		MAC:              mac,
-		EncryptedPayload: encryptedPayload,
+		ChannelHash:      data[0],
+		MAC:              [2]byte{data[1], data[2]},
+		EncryptedPayload: data[3:],
 	}, nil
 }
 
 func (g *GroupText) ToBytes() ([]byte, error) {
-	buffer := bytes.Buffer{}
-
-	err := buffer.WriteByte(g.ChannelHash)
-	if err != nil {
-		return nil, err
-	}
-
-	_, macErr := buffer.Write(g.MAC[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	_, payloadErr := buffer.Write(g.EncryptedPayload)
-	if payloadErr != nil {
-		return nil, payloadErr
-	}
-
-	return buffer.Bytes(), nil
+	return append([]byte{g.ChannelHash, g.MAC[0], g.MAC[1]}, g.EncryptedPayload...), nil
 }
 
 func (g *GroupText) VerifyMAC(channelKey []byte) bool {
-	src := make([]byte, cipherMACSize+len(g.EncryptedPayload))
-	copy(src[:cipherMACSize], g.MAC[:])
-	copy(src[cipherMACSize:], g.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(channelKey, src)
-	return result != nil
+	return g.Decrypt(channelKey) != nil
 }
 
+// Decrypt returns the plaintext, or nil if the MAC does not verify.
 func (g *GroupText) Decrypt(channelKey []byte) []byte {
-	src := make([]byte, cipherMACSize+len(g.EncryptedPayload))
-	copy(src[:cipherMACSize], g.MAC[:])
-	copy(src[cipherMACSize:], g.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(channelKey, src)
-	return result
+	return macDecrypt(channelKey, g.MAC, g.EncryptedPayload)
 }
 
 func (p *GroupTextPayload) Encrypt(channelHash byte, psk []byte) (*GroupText, error) {
@@ -89,11 +51,12 @@ func (p *GroupTextPayload) Encrypt(channelHash byte, psk []byte) (*GroupText, er
 		return nil, err
 	}
 	buf.WriteByte(p.Flags)
+	prefix := ""
 	if p.Sender != "" {
-		buf.WriteString(p.Sender)
-		buf.WriteString(": ")
+		prefix = p.Sender + ": "
 	}
-	buf.WriteString(p.Text)
+	buf.WriteString(prefix)
+	buf.WriteString(TruncateUTF8(p.Text, MaxTextLen-len(prefix)))
 
 	encrypted, err := EncryptThenMAC(psk, buf.Bytes())
 	if err != nil {
@@ -109,9 +72,9 @@ func (p *GroupTextPayload) Encrypt(channelHash byte, psk []byte) (*GroupText, er
 
 // DecryptStruct decrypts the payload and parses the result into a GroupTextPayload.
 func (g *GroupText) DecryptStruct(channelKey []byte) (*GroupTextPayload, error) {
-	plaintext := g.Decrypt(channelKey)
-	if plaintext == nil {
-		return nil, fmt.Errorf("decryption failed (invalid MAC or key)")
+	plaintext, err := macDecryptErr(channelKey, g.MAC, g.EncryptedPayload)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting group text: %w", err)
 	}
 	if len(plaintext) < 5 {
 		return nil, fmt.Errorf("decrypted payload too short: %d bytes", len(plaintext))

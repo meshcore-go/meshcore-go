@@ -369,3 +369,38 @@ func TestBuildTextPlaintextWithAttempt(t *testing.T) {
 		seen[key] = true
 	}
 }
+
+func TestNewTextMessage(t *testing.T) {
+	var aSeed, bSeed [ed25519.SeedSize]byte
+	aSeed[0], bSeed[0] = 1, 2
+	alice, bob := NewLocalIdentityFromSeed(aSeed), NewLocalIdentityFromSeed(bSeed)
+	shared, err := alice.SharedSecret(bob.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := BuildTextPlaintext(time.Unix(1700000000, 0), 0, []byte("hi bob"))
+
+	tm, err := NewTextMessage(alice, bob.Identity, plain, shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tm.Destination != bob.PublicKey()[0] || tm.Source != alice.PublicKey()[0] {
+		t.Fatalf("dest 0x%02x src 0x%02x", tm.Destination, tm.Source)
+	}
+	if len(tm.EncryptedPayload)%16 != 0 {
+		t.Fatalf("ciphertext %d bytes, want block multiple", len(tm.EncryptedPayload))
+	}
+	bobShared, _ := bob.SharedSecret(alice.Identity)
+	got := tm.Decrypt(bobShared)
+	if !bytes.Equal(got[:len(plain)], plain) {
+		t.Fatalf("Decrypt = %x, want prefix %x", got, plain)
+	}
+	wire, _ := tm.ToBytes()
+	if !bytes.Equal(wire[:4], []byte{tm.Destination, tm.Source, tm.MAC[0], tm.MAC[1]}) || !bytes.Equal(wire[4:], tm.EncryptedPayload) {
+		t.Fatalf("ToBytes = %x", wire)
+	}
+	back, err := TextMessageFromBytes(wire)
+	if err != nil || back.MAC != tm.MAC || !bytes.Equal(back.EncryptedPayload, tm.EncryptedPayload) {
+		t.Fatalf("FromBytes(ToBytes()) = %+v err %v", back, err)
+	}
+}
