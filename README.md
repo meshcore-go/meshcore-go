@@ -1,56 +1,61 @@
 # meshcore-go
 
-Go implementation of the [MeshCore](https://github.com/meshcore-dev/MeshCore) protocol. Provides encode/decode for all protocol payload types, cryptographic operations, identity/key management, the companion protocol (frame layer + command/response serialization), transport layers (Serial/TCP), a high-level client, hardware modem abstraction (KISS framing), and a node runtime (routing, peer management, scheduling).
+Go implementation of the [MeshCore](https://github.com/meshcore-dev/MeshCore) protocol, tracking firmware **v1.17.1**. Provides encode/decode for every protocol payload type, the cryptography, identity and key management, the companion serial protocol (frames, commands, responses, pushes) with a typed client, a KISS modem driver for bare radios, Serial/TCP transports for both, and a node runtime (routing, peers, channels, regions, retries, scheduling).
 
 ## Package Structure
 
 ```
 meshcore-go/
-  *.go                        # Core protocol: packets, payloads, crypto, identity, Cayenne LPP
+  *.go                        # Core protocol: packet, payload types, crypto, identity,
+                              # channels, regions, dedup, Cayenne LPP
   companion/
-    *.go                      # Companion protocol: frames, commands, responses, push codes
+    constants.go              # Command / response / push / error codes, txt types
+    frame.go                  # 0x3c/0x3e framing + streaming FrameParser
+    commands.go               # Command encoders (ToBytes)
+    responses.go              # Response and push parsers (ParseResponse)
     client/
-      client.go               # High-level Client with typed methods for all commands
-      modem.go                # CompanionModem: bridges Client to node.Modem interface
-    transport/                 # Separate module (companion/transport/go.mod)
-      transport.go            # Transport interface + shared read/write loop
-      serial.go               # Serial transport (go.bug.st/serial)
-      tcp.go                  # TCP transport
+      client.go               # Client: typed methods for every command, push handlers
+      modem.go                # CompanionModem: adapts Client to node.Modem
+    transport/                # Separate module (own go.mod, brings in go.bug.st/serial)
+      transport.go            # Shared read/write loop, reconnect with backoff, TX queue
+      serial.go, tcp.go       # Serial and TCP transports
   hardware/
-    modem.go                  # Hardware modem abstraction
-    kiss.go                   # KISS framing protocol
-    transport/                # Separate module (hardware/transport/go.mod)
-      transport.go            # Transport interface
-      serial.go               # Serial transport
-      tcp.go                  # TCP transport
+    kiss.go                   # KISS framing, hardware sub-commands, RadioConfig
+    modem.go                  # KissModem: RX metadata pairing, TX flow control
+    airtime.go                # LoRa airtime estimator
+    transport/                # Separate module (own go.mod)
+      transport.go            # Shared read loop with frame resync
+      serial.go, tcp.go       # Serial and TCP transports
   node/
-    node.go                   # Node runtime: startup, identity, radio integration
-    router.go                 # Packet routing and forwarding
-    peer.go                   # Peer tracking and management
-    mux.go                    # Radio multiplexer (multi-modem support)
-    tx_engine.go              # Shared TX engine: queue, airtime budget, drain loop
-    flood_delay.go            # Flood retransmit delay calculation
-    channel.go                # Channel/group configuration
-    dedup.go                  # Packet deduplication
-    dispatch.go               # Incoming packet dispatch
-    txqueue.go                # Transmit queue with priority
-    airtime.go                # Airtime estimation
+    node.go                   # Node: identity, options, send helpers, lifecycle
+    router.go                 # Flood/direct routing and forwarding policy
+    dispatch.go               # Inbound packet dispatch
+    peer.go                   # PeerTable: LRU peers, learned paths
+    channel.go, region.go     # Channel table, RegionMap (flood scopes)
+    crypto.go                 # Bounded shared-secret cache
+    ack.go, retry.go          # ACK tracking and retransmission
+    mux.go                    # RadioMux: several modems behind one TX engine
+    queued_radio.go           # QueuedRadio: single radio behind a TX engine
+    tx_engine.go, txqueue.go  # Priority queue, airtime budget, drain loop
+    airtime.go, flood_delay.go# Duty-cycle budget, flood retransmit delay
     selfadvert.go             # Periodic self-advertisement
+    radio.go                  # Radio / Modem interfaces
 ```
 
 ## Installation
 
 ```bash
-# Core protocol + companion + client
+# Core protocol + companion + client + hardware + node
 go get github.com/meshcore-go/meshcore-go
 
-# Transport layer (separate module, brings in go.bug.st/serial)
+# Transports are separate modules (they bring in go.bug.st/serial)
 go get github.com/meshcore-go/meshcore-go/companion/transport
+go get github.com/meshcore-go/meshcore-go/hardware/transport
 ```
 
 ## Quick Start
 
-### TCP Connection
+### Companion device over TCP
 
 ```go
 package main
@@ -66,14 +71,10 @@ import (
 )
 
 func main() {
-    t := transport.NewTCPTransport(transport.TCPConfig{
-        Address: "localhost:5000",
-    })
+    t := transport.NewTCPTransport(transport.TCPConfig{Address: "localhost:5000"})
 
     c := client.New(t)
-    c.SetErrorHandler(func(err error) {
-        log.Printf("error: %v", err)
-    })
+    c.SetErrorHandler(func(err error) { log.Printf("error: %v", err) })
 
     ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
     defer cancel()
@@ -87,19 +88,20 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("Firmware: %s (v%d)\n", info.FirmwareBuildDate, info.FirmwareVersion)
+    fmt.Printf("Firmware %s (%s), %d contacts max\n",
+        info.FirmwareVersionStr, info.FirmwareBuildDate, info.MaxContacts)
 
     contacts, err := c.GetContacts(ctx)
     if err != nil {
         log.Fatal(err)
     }
-    for _, c := range contacts {
-        fmt.Printf("  %s (%x)\n", c.AdvertName, c.PublicKey[:6])
+    for _, ct := range contacts {
+        fmt.Printf("  %s (%x)\n", ct.AdvertName, ct.PublicKey[:6])
     }
 }
 ```
 
-### Serial Connection
+### Serial
 
 ```go
 t := transport.NewSerialTransport(transport.SerialConfig{
@@ -107,148 +109,137 @@ t := transport.NewSerialTransport(transport.SerialConfig{
     BaudRate: 115200,
 })
 c := client.New(t)
-// ... same API as TCP
+// same API as TCP
 ```
 
-### Push Handlers
+### Push handlers
+
+`OnPush` returns an unsubscribe function.
 
 ```go
-c.OnPush(companion.PushMsgWaiting, func(resp companion.Response) {
-    msg := resp.Data.(companion.PushMsgWaitingResponse)
-    log.Printf("message waiting from %x", msg.SenderPrefix)
-})
-
-c.OnPush(companion.PushSendConfirmed, func(resp companion.Response) {
+stop := c.OnPush(companion.PushSendConfirmed, func(resp companion.Response) {
     ack := resp.Data.(companion.PushSendConfirmedResponse)
-    log.Printf("ACK confirmed: %08x (round trip: %dms)", ack.AckCode, ack.RoundTrip)
+    log.Printf("ACK %08x confirmed, round trip %d ms", ack.AckCode, ack.RoundTrip)
+})
+defer stop()
+
+c.OnPush(companion.PushMsgWaiting, func(companion.Response) {
+    msgs, err := c.GetWaitingMessages(ctx)
+    // msgs holds contact texts, channel texts and channel datagrams
 })
 ```
 
-### Core Protocol (without companion layer)
+Requests to remote nodes (`SendLogin`, `SendStatusReq`, `SendTelemetryReq`, `SendBinaryReq`, `SendTracePath`) return once the firmware has queued the packet. The result arrives later as the matching push (`PushLoginSuccess`, `PushStatusResponse`, and so on).
+
+### Core protocol only
 
 ```go
 import meshcore "github.com/meshcore-go/meshcore-go"
 
-// Decode a packet
-pkt, err := meshcore.PacketFromBytes(rawData)
+pkt, err := meshcore.PacketFromBytes(raw)
 fmt.Println(pkt.PayloadTypeString()) // "TXT_MSG"
 
-// Decode a text message payload
 msg, err := meshcore.TextMessageFromBytes(pkt.Payload)
-if msg.VerifyMAC(sharedSecret) {
-    plaintext := msg.Decrypt(sharedSecret)
-}
+plain := msg.Decrypt(sharedSecret) // nil when the MAC does not verify
 
-// Encode an advert
-appData := &meshcore.AdvertAppData{
-    Type: "CHAT",
-    Name: "my-node",
-    Lat:  -368700000,
-    Lon:  1749200000,
-}
+grp, err := meshcore.GroupTextFromBytes(pkt.Payload)
+post, err := grp.DecryptStruct(channelKey) // errors.Is(err, meshcore.ErrBadMAC) on a wrong key
+
+appData := meshcore.AdvertAppData{Type: "CHAT", Name: "my-node", Lat: -368700000, Lon: 1749200000}
+```
+
+### A node behind a companion radio
+
+```go
+modem := client.NewCompanionModem(ctx, c)          // sends with CMD_SEND_RAW_PACKET
+radio := node.NewQueuedRadio(modem, done)
+n := node.New(identity, radio,
+    node.WithAdvertData(appData),
+    node.WithAllowForwardHandler(func(*meshcore.Packet) bool { return true }),
+)
 ```
 
 ## API Overview
 
-### Core Protocol (`meshcore`)
+### Core protocol (`meshcore`)
 
 | Type | Description |
 |------|-------------|
-| `Packet` | Mesh packet header, path, payload |
-| `TextMessage` | Encrypted text message with MAC |
-| `Advert` / `AdvertAppData` | Node advertisement with Ed25519 signing |
-| `Identity` / `LocalIdentity` | Ed25519 key management and key exchange |
-| `Ack` | Acknowledgement with CRC |
-| `Request` / `Response` | Encrypted request/response payloads |
-| `GroupText` / `GroupData` | Channel-based group messaging |
-| `AnonReq` | Anonymous request |
-| `Path` | Routing path data |
-| `Control` | Control messages |
-| `Trace` | Path trace with hash chain |
-| `MultiPart` | Multi-part message fragments |
-| `RawCustom` | Raw custom payload |
+| `Packet` | Header, encoded path, payload; `Clone`, `PathHashes`, `Validate` |
+| `TextMessage`, `Request`, `Response`, `Path`, `AnonReq`, `GroupText`, `GroupData` | Encrypted payloads: `FromBytes`, `ToBytes`, `VerifyMAC`, `Decrypt`; `GroupText` and `Path` add `DecryptStruct` |
+| `Advert` / `AdvertAppData` | Signed node advertisement; names are truncated at a UTF-8 boundary to fit 32 bytes |
+| `Ack`, `Control`, `Trace`, `MultiPart`, `RawCustom` | Remaining payload types |
+| `Identity` / `LocalIdentity` | Ed25519 keys, seed and firmware expanded-key import, key exchange |
+| `ChannelEntry`, `Region` | Channel PSK/hash derivation, flood-scope transport keys |
+| `DedupCache` | 160-entry packet-hash ring, as in the firmware |
 
-Crypto: `DeriveSharedSecret`, `EncryptThenMAC`, `MACThenDecrypt`, AES-128-ECB.
+Crypto: `DeriveSharedSecret`, `EncryptThenMAC`, `MACThenDecrypt` (AES-128-ECB plus truncated HMAC-SHA256). MAC failures return `ErrBadMAC`; truncated input returns `ErrTooShort`.
 
-Cayenne LPP: `LPPEncoder` (26 sensor types) and `LPPDecode`.
+Cayenne LPP: `LPPEncoder` (27 data types including polyline) and `LPPDecode`, matching the firmware's own reader.
 
-### Companion Protocol (`companion`)
+SNR on the wire is quarter-dB; `SNRFromWire` and `PathSNRdB` convert to real dB.
 
-55 command types, 28 response types, 14 push notification types. Frame layer with streaming parser.
+### Companion protocol (`companion`)
+
+58 commands, 29 responses, 17 pushes. `ParseResponse` dispatches through a code-to-parser table; unknown codes come back with the raw payload. Path-length bytes in advert-path, path-discovery and trace frames are decoded with the firmware's hash-size encoding, and signed plain text exposes the sender prefix separately from the text.
 
 ### Client (`companion/client`)
 
-Typed methods wrapping all companion commands:
+One typed method per command, all taking a `context.Context` except `Reboot` and `FactoryReset`, which get no reply. Commands are serialised internally because the firmware answers in order with no correlation id.
 
-- Device: `DeviceQuery`, `AppStart`, `SetDeviceTime`, `SyncDeviceTime`, `GetBatteryVoltage`, `Reboot`, `FactoryReset`
-- Contacts: `GetContacts`, `GetContactsSince`, `AddUpdateContact`, `RemoveContact`, `ShareContact`, `ExportContact`, `ImportContact`, `GetContactByKey`
-- Messaging: `SendTextMessage`, `SendChannelTextMessage`, `SendChannelData`, `GetWaitingMessages`
-- Radio: `SetRadioParams`, `SetTxPower`, `SetTuningParams`, `GetTuningParams`
-- Configuration: `SetAdvertName`, `SetAdvertLatLon`, `SetChannel`, `GetChannel`, `SetAutoAddConfig`, `SetDevicePin`, `SetOtherParams`, `SetFloodScope`
-- Security: `ExportPrivateKey`, `ImportPrivateKey`, `SendLogin`, `Logout`, `SignStart`, `SignData`, `SignFinish`
-- Network: `SendSelfAdvert`, `SendTracePath`, `SendPathDiscoveryReq`, `HasConnection`, `GetStats`, `GetAdvertPath`, `ResetPath`
-- Raw/Advanced: `SendRawData`, `SendControlData`, `SendBinaryReq`, `SendAnonReq`, `SendTelemetryReq`, `GetCustomVars`, `SetCustomVar`
+- Device: `DeviceQuery`, `AppStart`, `SetDeviceTime`, `SyncDeviceTime`, `GetDeviceTime`, `GetBattAndStorage`, `GetStats`, `Reboot`, `FactoryReset`
+- Contacts: `GetContacts`, `GetContactsSince`, `GetContactByKey`, `AddUpdateContact`, `AddUpdateContactFull`, `RemoveContact`, `ShareContact`, `ExportContact`, `ImportContact`, `ResetPath`, `GetAdvertPath`
+- Messaging: `SendTextMessage`, `SendChannelTextMessage`, `SendChannelData`, `SendChannelDataFlood`, `GetWaitingMessages`
+- Radio and tuning: `SetRadioParams`, `SetTxPower`, `SetTuningParams`, `GetTuningParams`, `GetAllowedRepeatFreq`, `SetPathHashMode`
+- Configuration: `SetAdvertName`, `SetAdvertLatLon`, `SetChannel`, `GetChannel`, `SetAutoAddConfig`, `GetAutoAddConfig`, `SetDevicePin`, `SetOtherParams`, `GetCustomVars`, `SetCustomVar`
+- Flood scopes: `SetFloodScope`, `SetFloodScopeUnscoped`, `SetDefaultFloodScope`, `ClearDefaultFloodScope`, `GetDefaultFloodScope`
+- Security: `ExportPrivateKey`, `ImportPrivateKey`, `SignStart`, `SignData`, `SignFinish`
+- Remote nodes: `SendLogin`, `Logout`, `HasConnection`, `SendStatusReq`, `SendTelemetryReq`, `SendBinaryReq`, `SendAnonReq`, `SendTracePath`, `SendPathDiscoveryReq`
+- Raw: `SendSelfAdvert`, `SendRawPacket`, `SendPacket`, `SendRawData`, `SendControlData`
 
-`CompanionModem` adapts the Client to the `node.Modem` interface for bridging companion devices into the node runtime.
+`CompanionModem` adapts the Client to `node.Modem`. It transmits with `SendRawPacket`, so the node's packets go on air unchanged, and receives every packet the radio hears via the log-RX push. `Close` detaches it from the Client.
 
-### Transport (`companion/transport`)
+### Transports (`companion/transport`, `hardware/transport`)
 
-| Type | Description |
-|------|-------------|
-| `Transport` | Interface: `Connect`, `Close`, `Send`, `SetResponseHandler`, `SetErrorHandler` |
-| `SerialTransport` | Serial port via `go.bug.st/serial` |
-| `TCPTransport` | TCP socket via `net.Dial` |
+Both modules provide `SerialTransport` (via `go.bug.st/serial`) and `TCPTransport`. The companion transport reconnects with exponential backoff and queues outbound commands while offline (oldest dropped when full); `Send` after `Close` returns `ErrClosed`. The hardware transport exposes `Dead()`, which closes when the current connection's read loop exits, and can be closed and connected again.
 
 ### Hardware (`hardware`)
 
-| Type | Description |
+| Name | Description |
 |------|-------------|
-| `Modem` | Hardware modem abstraction for raw packet send/receive |
-| `KISSEncoder` / `KISSDecode` | KISS framing for serial packet transport |
+| `KissModem` | Raw packet send/receive over a KISS TNC; pairs each data frame with its RX metadata |
+| `EncodeFrame`, `DecodeFrame`, `ExtractFrames`, `EscapeData`, `UnescapeData` | KISS framing |
+| `EncodeHardwareFrame`, `DecodeHardwareFrame`, `RadioConfig` | Hardware sub-commands |
+| `LoRaAirtimeEstimator` | Airtime from radio parameters; accepts coding rate as 1-4 or 5-8 |
 
-`hardware/transport` is a separate module providing Serial and TCP transports for direct hardware connections.
+Inbound frames are buffered (1024 by default, `WithInboundBuffer`); when full, the oldest is dropped with a warning so the read loop never blocks. Corrupted streams resync at the next frame boundary.
 
-#### Backpressure & Reliability
+TX flow control is on by default with a fixed 5-second timeout. `SendData` rejects empty or over-255-byte packets up front, then waits for `HW_RESP_TX_DONE`; a result byte other than success returns `ErrTxFailed`, and no reply returns `ErrTxTimeout`. Hardware error frames seen mid-send are ignored, because firmware 1.17 also raises `HW_ERR_TX_BUSY` for host-output backpressure. `ErrTxBusy` remains exported but is no longer returned.
 
-The `KissModem` buffers up to 1024 inbound frames (configurable via `WithInboundBuffer`). If the buffer fills (e.g., handlers are slow), the **oldest frame is dropped** to keep the transport read loop flowing — the modem will never block on receive. A warning is logged when this occurs.
-
-Each transport exposes a `Dead() <-chan struct{}` channel that closes when the read loop exits (I/O error, disconnection). Select on this to detect a dead transport and trigger reconnection at a higher layer.
-
-If the byte stream becomes corrupted (remainder exceeds max frame size without a valid FEND), the parser discards the buffered bytes and resyncs at the next frame boundary.
-
-#### TX Flow Control
-
-TX flow control is **enabled by default** (5-second fixed timeout). After each `SendData` call, the modem blocks until `HW_RESP_TX_DONE` or `HW_RESP_ERROR` is received from the firmware. If no response arrives within the timeout, `SendData` returns `ErrTxTimeout`. On `HW_ERR_TX_BUSY` it returns `ErrTxBusy`; other hardware errors return `ErrTxFailed`. The transmit queue drops packets on any send error.
-
-### Node Runtime (`node`)
+### Node runtime (`node`)
 
 | Type | Description |
 |------|-------------|
-| `Node` | Full mesh node: identity, radio, routing, scheduling |
-| `Router` | Packet routing and forwarding decisions |
-| `RadioMux` | Multi-modem multiplexer with shared TX engine |
-| `QueuedRadio` | Single-radio TX queue wrapper with shared TX engine |
-| `Peer` / `PeerTable` | Peer tracking and path management |
-| `TxQueue` | Priority-based transmit queue |
+| `Node` | Mesh node: identity, radio, routing, channels, regions, retries; options are order-independent |
+| `RadioMux` | Several modems behind one TX engine; `Stop` detaches from the modems |
+| `QueuedRadio` | One radio behind a TX engine with `ErrTxQueueFull` backpressure |
+| `Peer` / `PeerTable` | LRU peer table; out-paths learned from adverts are stored in send order |
+| `RegionMap` | Flood scopes and transport-key lookup |
 
-#### Handler Contract
+Routing follows the firmware: only ACK, PATH, REQ, RESPONSE, TXT_MSG, ANON_REQ, GRP_TXT, GRP_DATA and verified ADVERT packets are re-flooded, and a direct packet with hops remaining is relayed but not delivered locally. Forwarding is opt-in through `WithAllowForwardHandler`.
 
-Packet handlers registered via `Node.OnPacket` and `Radio.SetDataHandler` are invoked **synchronously** on the receive goroutine. Handlers must return promptly — a blocking handler stalls the entire receive pipeline for that radio. If you need to do slow work (I/O, network calls, heavy computation), dispatch to your own goroutine or channel from within the handler.
+#### Handler contract
+
+Handlers registered with `Node.OnPacket` and `Radio.SetDataHandler` run synchronously on the receive goroutine. Return promptly; hand slow work to your own goroutine or channel.
 
 ## Development
 
-This project uses Go workspaces for multi-module development:
-
 ```bash
-# Run all tests
-go test ./...
-
-# Run transport tests (separate module)
-cd companion/transport && go test ./...
-
-# Coverage
-go test -coverprofile=cover.out ./...
-go tool cover -func=cover.out
+go test ./...                              # root, companion, hardware, node
+(cd companion/transport && go test ./...)  # separate modules
+(cd hardware/transport && go test ./...)
+go test -race ./node/... ./hardware/...
+go test -run=^$ -fuzz=FuzzPacketFromBytes -fuzztime=30s .
 ```
 
 ## License
