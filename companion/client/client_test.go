@@ -556,7 +556,7 @@ func TestDeviceError(t *testing.T) {
 	mt.onSend = func(_ []byte) {
 		go mt.fireResponse(companion.Response{
 			Code: companion.RespErr,
-			Data: companion.ErrResponse{ErrorCode: companion.ErrNotFound, HasErrorCode: true},
+			Data: companion.ErrResponse{ErrorCode: companion.ErrCodeNotFound, HasErrorCode: true},
 		})
 	}
 
@@ -572,8 +572,8 @@ func TestDeviceError(t *testing.T) {
 	if !errors.As(err, &devErr) {
 		t.Fatalf("expected *DeviceError, got %T: %v", err, err)
 	}
-	if devErr.Code != companion.ErrNotFound {
-		t.Errorf("error code = %d, want %d", devErr.Code, companion.ErrNotFound)
+	if devErr.Code != companion.ErrCodeNotFound {
+		t.Errorf("error code = %d, want %d", devErr.Code, companion.ErrCodeNotFound)
 	}
 	if devErr.Error() != "device error: not found" {
 		t.Errorf("error string = %q", devErr.Error())
@@ -794,7 +794,7 @@ func TestGetContactsError(t *testing.T) {
 			})
 			mt.fireResponse(companion.Response{
 				Code: companion.RespErr,
-				Data: companion.ErrResponse{ErrorCode: companion.ErrBadState, HasErrorCode: true},
+				Data: companion.ErrResponse{ErrorCode: companion.ErrCodeBadState, HasErrorCode: true},
 			})
 		}()
 	}
@@ -807,8 +807,7 @@ func TestGetContactsError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -818,12 +817,12 @@ func TestDeviceErrorCodes(t *testing.T) {
 		code byte
 		want string
 	}{
-		{companion.ErrUnsupportedCmd, "device error: unsupported command"},
-		{companion.ErrNotFound, "device error: not found"},
-		{companion.ErrTableFull, "device error: table full"},
-		{companion.ErrBadState, "device error: bad state"},
-		{companion.ErrFileIoError, "device error: file I/O error"},
-		{companion.ErrIllegalArg, "device error: illegal argument"},
+		{companion.ErrCodeUnsupportedCmd, "device error: unsupported command"},
+		{companion.ErrCodeNotFound, "device error: not found"},
+		{companion.ErrCodeTableFull, "device error: table full"},
+		{companion.ErrCodeBadState, "device error: bad state"},
+		{companion.ErrCodeFileIoError, "device error: file I/O error"},
+		{companion.ErrCodeIllegalArg, "device error: illegal argument"},
 		{99, "device error: code 99"},
 	}
 
@@ -2169,8 +2168,7 @@ func TestAppStartRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2190,8 +2188,7 @@ func TestGetDeviceTimeRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2211,8 +2208,7 @@ func TestExportPrivateKeyRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2232,8 +2228,7 @@ func TestGetCustomVarsRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2253,8 +2248,7 @@ func TestGetAutoAddConfigRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2274,8 +2268,7 @@ func TestGetAllowedRepeatFreqRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2295,8 +2288,7 @@ func TestSignStartRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2316,8 +2308,7 @@ func TestSignFinishRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
 	}
 }
@@ -2337,8 +2328,167 @@ func TestGetTuningParamsRespErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var devErr *DeviceError
-	if !errors.As(err, &devErr) {
+	if _, ok := errors.AsType[*DeviceError](err); !ok {
 		t.Fatalf("expected *DeviceError, got %T", err)
+	}
+}
+
+func TestSendRequestsAcceptSent(t *testing.T) {
+	var pk [32]byte
+	id := meshcore.NewIdentity(pk)
+	calls := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{"login", func(ctx context.Context, c *Client) error { return c.SendLogin(ctx, id, "pw") }},
+		{"status", func(ctx context.Context, c *Client) error { return c.SendStatusReq(ctx, id) }},
+		{"telemetry", func(ctx context.Context, c *Client) error { return c.SendTelemetryReq(ctx, id) }},
+		{"binary", func(ctx context.Context, c *Client) error { return c.SendBinaryReq(ctx, id, []byte{1}) }},
+		{"trace", func(ctx context.Context, c *Client) error { return c.SendTracePath(ctx, 1, 2, 0, nil) }},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			mt := &mockTransport{}
+			c := New(mt)
+			mt.onSend = func(_ []byte) {
+				go mt.fireResponse(companion.Response{Code: companion.RespSent, Data: companion.SentResponse{IsFlood: true, Tag: 7, EstTimeout: 3000, HasExtended: true}})
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := tc.call(ctx, c); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestSendChannelTextMessageAcceptsOk(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sent, err := c.SendChannelTextMessage(ctx, 0, "hi", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.HasAckCode || sent.HasExtended {
+		t.Errorf("expected empty SentResponse on OK, got %+v", sent)
+	}
+}
+
+func TestGetWaitingMessagesChannelData(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	var mu sync.Mutex
+	n := 0
+	mt.onSend = func(cmd []byte) {
+		if cmd[0] != companion.CmdSyncNextMessage {
+			return
+		}
+		mu.Lock()
+		i := n
+		n++
+		mu.Unlock()
+		go func() {
+			if i == 0 {
+				mt.fireResponse(companion.Response{Code: companion.RespChannelDataRecv,
+					Data: companion.ChannelDataRecvResponse{ChannelIdx: 2, DataType: 0x1234, Data: []byte{9}}})
+			} else {
+				mt.fireResponse(companion.Response{Code: companion.RespNoMoreMessages, Data: companion.NoMoreMessagesResponse{}})
+			}
+		}()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	msgs, err := c.GetWaitingMessages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].ChannelData == nil || msgs[0].ChannelData.DataType != 0x1234 || !msgs[0].IsChannel {
+		t.Fatalf("messages = %+v", msgs)
+	}
+}
+
+func TestCommandsAreSerialised(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	mt.onSend = func(cmd []byte) {
+		code := cmd[0]
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			switch code {
+			case companion.CmdGetDeviceTime:
+				mt.fireResponse(companion.Response{Code: companion.RespCurrTime, Data: companion.CurrTimeResponse{Timestamp: 42}})
+			default:
+				mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+			}
+		}()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 10 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := c.GetDeviceTime(ctx); err != nil {
+				errs <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := c.SetDeviceTime(ctx, uint32(i)); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestOnPushUnsubscribe(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	var a, b int
+	unsubA := c.OnPush(companion.PushAdvert, func(companion.Response) { a++ })
+	c.OnPush(companion.PushAdvert, func(companion.Response) { b++ })
+	mt.fireResponse(companion.Response{Code: companion.PushAdvert})
+	unsubA()
+	unsubA()
+	mt.fireResponse(companion.Response{Code: companion.PushAdvert})
+	if a != 1 || b != 2 {
+		t.Errorf("a=%d b=%d, want 1 2", a, b)
+	}
+}
+
+func TestAddUpdateContactLayout(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	mt.onSend = func(_ []byte) {
+		go mt.fireResponse(companion.Response{Code: companion.RespOk, Data: companion.OkResponse{}})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var pk [32]byte
+	pk[0] = 0xab
+	if err := c.AddUpdateContact(ctx, meshcore.NewIdentity(pk), "Bob"); err != nil {
+		t.Fatal(err)
+	}
+	mt.mu.Lock()
+	frame := mt.sent[0]
+	mt.mu.Unlock()
+	if len(frame) != 148 {
+		t.Fatalf("frame length = %d, want 148", len(frame))
+	}
+	if frame[33] != meshcore.AdvertTypeChat || frame[35] != companion.OutPathUnknown || string(frame[100:103]) != "Bob" {
+		t.Errorf("type=%d out_path_len=0x%02x name=%q", frame[33], frame[35], frame[100:132])
 	}
 }

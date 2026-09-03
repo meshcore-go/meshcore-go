@@ -2,6 +2,7 @@ package companion
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -145,7 +146,7 @@ func TestParseResponse(t *testing.T) {
 		{name: "ok no value", frameData: hexBytes(t, "00"), wantCode: RespOk, wantData: OkResponse{HasValue: false}},
 		{name: "ok with value", frameData: hexBytes(t, "000a000000"), wantCode: RespOk, wantData: OkResponse{Value: 10, HasValue: true}},
 		{name: "err no code", frameData: hexBytes(t, "01"), wantCode: RespErr, wantData: ErrResponse{HasErrorCode: false}},
-		{name: "err with code", frameData: hexBytes(t, "0102"), wantCode: RespErr, wantData: ErrResponse{ErrorCode: ErrNotFound, HasErrorCode: true}},
+		{name: "err with code", frameData: hexBytes(t, "0102"), wantCode: RespErr, wantData: ErrResponse{ErrorCode: ErrCodeNotFound, HasErrorCode: true}},
 		{name: "contacts start with count", frameData: hexBytes(t, "020a000000"), wantCode: RespContactsStart, wantData: ContactsStartResponse{Count: 10, HasCount: true}},
 		{name: "contacts start empty", frameData: hexBytes(t, "02"), wantCode: RespContactsStart, wantData: ContactsStartResponse{HasCount: false}},
 		{
@@ -208,16 +209,16 @@ func TestParseResponse(t *testing.T) {
 		{name: "push send confirmed", frameData: hexBytes(t, "82040302010d0c0b0a"), wantCode: PushSendConfirmed, wantData: PushSendConfirmedResponse{AckCode: 0x01020304, RoundTrip: 0x0a0b0c0d}},
 		{name: "push msg waiting", frameData: []byte{PushMsgWaiting}, wantCode: PushMsgWaiting, wantData: PushMsgWaitingResponse{}},
 		{name: "push raw data", frameData: hexBytes(t, "84ffd600112233"), wantCode: PushRawData, wantData: PushRawDataResponse{LastSNR: -0.25, LastRSSI: int8(-42), Payload: []byte{0x11, 0x22, 0x33}}}, // -1/4 dB
-		{name: "push login success", frameData: hexBytes(t, "85ee112233445566"), wantCode: PushLoginSuccess, wantData: PushLoginSuccessResponse{PubKeyPrefix: pushLoginPrefix}},
+		{name: "push login success", frameData: hexBytes(t, "85ee112233445566"), wantCode: PushLoginSuccess, wantData: PushLoginSuccessResponse{Permissions: 0xee, PubKeyPrefix: pushLoginPrefix}},
 		{name: "push status resp", frameData: hexBytes(t, "8700212223242526deadbeef"), wantCode: PushStatusResponse, wantData: PushStatusResp{PubKeyPrefix: pushStatusPrefix, StatusData: []byte{0xde, 0xad, 0xbe, 0xef}}},
 		{name: "push log rx data", frameData: hexBytes(t, "8805f0aabb"), wantCode: PushLogRxData, wantData: PushLogRxDataResponse{LastSNR: 1.25, LastRSSI: int8(-16), Raw: []byte{0xaa, 0xbb}}}, // 5/4 dB
 		{
 			name:      "push trace data",
-			frameData: hexBytes(t, "890002a54433221188776655102001fffd"),
+			frameData: hexBytes(t, "890002a44433221188776655102001fffd"),
 			wantCode:  PushTraceData,
 			wantData: PushTraceDataResponse{
 				PathLen:    0x02,
-				Flags:      0xa5,
+				Flags:      0xa4,
 				Tag:        0x11223344,
 				AuthCode:   0x55667788,
 				PathHashes: []byte{0x10, 0x20},
@@ -655,4 +656,94 @@ func TestReadCString(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseResponseFirmwareLayouts(t *testing.T) {
+	tests := []struct {
+		name     string
+		frame    string
+		wantCode byte
+		wantData any
+	}{
+		{
+			name:     "trace data 2-byte hashes",
+			frame:    "89" + "00" + "04" + "01" + "44332211" + "88776655" + "a1a2b1b2" + "04f8" + "fc",
+			wantCode: PushTraceData,
+			wantData: PushTraceDataResponse{PathLen: 4, Flags: 0x01, Tag: 0x11223344, AuthCode: 0x55667788,
+				PathHashes: []byte{0xa1, 0xa2, 0xb1, 0xb2}, PathSnrs: []byte{0x04, 0xf8}, LastSNR: -1},
+		},
+		{
+			name:     "advert path 2-byte hashes",
+			frame:    "16" + "44332211" + "42" + "a1a2b1b2",
+			wantCode: RespAdvertPath,
+			wantData: AdvertPathResponse{RecvTimestamp: 0x11223344, PathLen: 0x42, Path: []byte{0xa1, 0xa2, 0xb1, 0xb2}},
+		},
+		{
+			name:     "path discovery encoded path lens",
+			frame:    "8d" + "00" + "112233445566" + "41" + "a1a2" + "02" + "0102",
+			wantCode: PushPathDiscoveryResponse,
+			wantData: PushPathDiscoveryResp{PubKeyPrefix: [6]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
+				OutPathLen: 0x41, OutPath: []byte{0xa1, 0xa2}, InPathLen: 0x02, InPath: []byte{0x01, 0x02}},
+		},
+		{
+			name:     "contact msg recv signed plain",
+			frame:    "07" + "a1a2a3a4a5a6" + "ff" + "02" + "44332211" + "deadbeef" + "6869",
+			wantCode: RespContactMsgRecv,
+			wantData: ContactMsgRecvResponse{PubKeyPrefix: [6]byte{0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6}, PathLen: 0xff, TxtType: TxtTypeSignedPlain,
+				SenderTimestamp: 0x11223344, SenderPrefix: []byte{0xde, 0xad, 0xbe, 0xef}, Text: "hi"},
+		},
+		{
+			name:     "channel msg recv v3 signed plain",
+			frame:    "11" + "04" + "0000" + "01" + "03" + "02" + "44332211" + "01020304" + "6f6b",
+			wantCode: RespChannelMsgRecvV3,
+			wantData: ChannelMsgRecvV3Response{SNR: 1, ChannelIdx: 1, PathLen: 3, TxtType: TxtTypeSignedPlain,
+				SenderTimestamp: 0x11223344, SenderPrefix: []byte{1, 2, 3, 4}, Text: "ok"},
+		},
+		{
+			name: "device info full",
+			frame: "0d" + "0d" + "32" + "08" + "39300000" +
+				hexOf("14 Aug 2026", 12) + hexOf("Heltec V3", 40) + hexOf("v1.17.1", 20) + "01" + "01",
+			wantCode: RespDeviceInfo,
+			wantData: DeviceInfoResponse{FirmwareVersion: 13, MaxContacts: 100, MaxChannels: 8, BLEPin: 12345,
+				FirmwareBuildDate: "14 Aug 2026", Model: "Heltec V3", FirmwareVersionStr: "v1.17.1", RepeatEnabled: true, PathHashMode: 1},
+		},
+		{
+			name:     "push login success extended",
+			frame:    "85" + "01" + "112233445566" + "44332211" + "07" + "02",
+			wantCode: PushLoginSuccess,
+			wantData: PushLoginSuccessResponse{Permissions: 1, PubKeyPrefix: [6]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
+				HasServerInfo: true, ServerTime: 0x11223344, ACL: 7, FirmwareLevel: 2},
+		},
+		{
+			name:     "end of contacts with lastmod",
+			frame:    "04" + "78563412",
+			wantCode: RespEndOfContacts,
+			wantData: EndOfContactsResponse{MostRecentLastmod: 0x12345678},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseResponse(hexBytes(t, tt.frame))
+			if err != nil {
+				t.Fatalf("ParseResponse: %v", err)
+			}
+			if got.Code != tt.wantCode {
+				t.Errorf("Code = 0x%02x, want 0x%02x", got.Code, tt.wantCode)
+			}
+			if !reflect.DeepEqual(got.Data, tt.wantData) {
+				t.Errorf("Data = %#v\nwant   %#v", got.Data, tt.wantData)
+			}
+		})
+	}
+
+	if _, err := ParsePushTraceDataResponse(hexBytes(t, "0004014433221188776655a1a2b1b204")); err == nil {
+		t.Error("trace frame missing an SNR byte accepted")
+	}
+}
+
+// hexOf hex-encodes s NUL-padded to width bytes.
+func hexOf(s string, width int) string {
+	b := make([]byte, width)
+	copy(b, s)
+	return hex.EncodeToString(b)
 }

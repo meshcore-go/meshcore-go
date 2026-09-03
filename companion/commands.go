@@ -2,7 +2,8 @@ package companion
 
 import (
 	"encoding/binary"
-	"unicode/utf8"
+
+	meshcore "github.com/meshcore-go/meshcore-go"
 )
 
 type AppStartCommand struct {
@@ -93,22 +94,33 @@ func (c GetContactsCommand) ToBytes() []byte {
 	return buf
 }
 
+// AddUpdateContactCommand mirrors the firmware's ContactInfo record.
 type AddUpdateContactCommand struct {
-	PublicKey [32]byte
-	Name      string
+	PublicKey    [32]byte
+	Type         byte // meshcore.AdvertType*; 0 marks an anonymous slot
+	Flags        byte
+	OutPathLen   byte
+	OutPath      []byte // up to 64 bytes
+	Name         string
+	LastAdvert   uint32
+	Latitude     int32 // degrees * 1e6
+	Longitude    int32
+	LastModified uint32
 }
 
 func (c AddUpdateContactCommand) ToBytes() []byte {
-	buf := make([]byte, 65)
+	buf := make([]byte, 148)
 	buf[0] = CmdAddUpdateContact
 	copy(buf[1:33], c.PublicKey[:])
-
-	nameBytes := []byte(c.Name)
-	if len(nameBytes) > 31 {
-		nameBytes = nameBytes[:31]
-	}
-	copy(buf[33:65], nameBytes)
-
+	buf[33] = c.Type
+	buf[34] = c.Flags
+	buf[35] = c.OutPathLen
+	copy(buf[36:100], c.OutPath)
+	copy(buf[100:132], meshcore.TruncateUTF8(c.Name, 31))
+	binary.LittleEndian.PutUint32(buf[132:136], c.LastAdvert)
+	binary.LittleEndian.PutUint32(buf[136:140], uint32(c.Latitude))
+	binary.LittleEndian.PutUint32(buf[140:144], uint32(c.Longitude))
+	binary.LittleEndian.PutUint32(buf[144:148], c.LastModified)
 	return buf
 }
 
@@ -142,11 +154,7 @@ func (c SetChannelCommand) ToBytes() []byte {
 	buf[0] = CmdSetChannel
 	buf[1] = c.ChannelIdx
 
-	nameBytes := []byte(c.Name)
-	if len(nameBytes) > 31 {
-		nameBytes = nameBytes[:31]
-	}
-	copy(buf[2:34], nameBytes)
+	copy(buf[2:34], meshcore.TruncateUTF8(c.Name, 31))
 
 	copy(buf[34:50], c.Secret[:])
 	return buf
@@ -169,12 +177,19 @@ func (c SetDeviceTimeCommand) ToBytes() []byte {
 	return buf
 }
 
+// SendSelfAdvertCommand asks the device to advertise itself.
 type SendSelfAdvertCommand struct {
+	Flood bool
+	// Deprecated: use Flood.
 	AdvertType byte
 }
 
 func (c SendSelfAdvertCommand) ToBytes() []byte {
-	return []byte{CmdSendSelfAdvert, c.AdvertType}
+	flag := c.AdvertType
+	if c.Flood {
+		flag = 1
+	}
+	return []byte{CmdSendSelfAdvert, flag}
 }
 
 type SetAdvertNameCommand struct {
@@ -573,20 +588,30 @@ func (c SetPathHashModeCommand) ToBytes() []byte {
 	return []byte{CmdSetPathHashMode, 0x00, c.Mode}
 }
 
+// SendChannelDataCommand sends a group datagram.
 type SendChannelDataCommand struct {
 	ChannelIdx byte
+	Flood      bool
+	PathLen    byte
 	Path       []byte
 	DataType   uint16
 	Payload    []byte
 }
 
 func (c SendChannelDataCommand) ToBytes() []byte {
-	buf := make([]byte, 5+len(c.Path)+len(c.Payload))
+	path := c.Path
+	pathLen := c.PathLen
+	if c.Flood {
+		path, pathLen = nil, OutPathUnknown
+	} else if pathLen == 0 {
+		pathLen = byte(len(path))
+	}
+	buf := make([]byte, 5+len(path)+len(c.Payload))
 	buf[0] = CmdSendChannelData
 	buf[1] = c.ChannelIdx
-	buf[2] = byte(len(c.Path))
-	copy(buf[3:3+len(c.Path)], c.Path)
-	dataTypeOffset := 3 + len(c.Path)
+	buf[2] = pathLen
+	copy(buf[3:3+len(path)], path)
+	dataTypeOffset := 3 + len(path)
 	binary.LittleEndian.PutUint16(buf[dataTypeOffset:dataTypeOffset+2], c.DataType)
 	copy(buf[dataTypeOffset+2:], c.Payload)
 	return buf
@@ -624,20 +649,7 @@ func (c SetDefaultFloodScopeCommand) ToBytes() []byte {
 	buf := make([]byte, 48)
 	buf[0] = CmdSetDefaultFloodScope
 
-	nameBytes := []byte(c.Name)
-	if len(nameBytes) > 30 {
-		nameBytes = nameBytes[:30]
-		// Drop a trailing rune split by the 30-byte cut so we never emit a
-		// partial UTF-8 sequence (firmware reads the name with strlen, leaving
-		// 1 byte for the null terminator in the 31-byte field).
-		for len(nameBytes) > 0 {
-			if r, size := utf8.DecodeLastRune(nameBytes); r != utf8.RuneError || size > 1 {
-				break
-			}
-			nameBytes = nameBytes[:len(nameBytes)-1]
-		}
-	}
-	copy(buf[1:32], nameBytes)
+	copy(buf[1:32], meshcore.TruncateUTF8(c.Name, 30))
 
 	copy(buf[32:48], c.Key)
 	return buf

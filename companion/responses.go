@@ -40,7 +40,10 @@ type ContactResponse struct {
 	LastModified    uint32
 }
 
-type EndOfContactsResponse struct{}
+// EndOfContactsResponse ends a contact listing.
+type EndOfContactsResponse struct {
+	MostRecentLastmod uint32
+}
 
 func (r ContactResponse) Identity() meshcore.Identity {
 	return meshcore.NewIdentity(r.PublicKey)
@@ -72,10 +75,17 @@ func (r SelfInfoResponse) Identity() meshcore.Identity {
 	return meshcore.NewIdentity(r.PublicKey)
 }
 
+// DeviceInfoResponse is the reply to CMD_DEVICE_QUERY.
 type DeviceInfoResponse struct {
-	FirmwareVersion   byte
-	FirmwareBuildDate string
-	Model             string
+	FirmwareVersion    byte // FIRMWARE_VER_CODE
+	MaxContacts        uint16
+	MaxChannels        byte
+	BLEPin             uint32
+	FirmwareBuildDate  string
+	Model              string
+	FirmwareVersionStr string
+	RepeatEnabled      bool // v9+ firmware
+	PathHashMode       byte // v10+ firmware
 }
 
 type BattAndStorageResponse struct {
@@ -159,6 +169,7 @@ type ContactMsgRecvResponse struct {
 	PubKeyPrefix    [6]byte
 	PathLen         byte
 	TxtType         byte
+	SenderPrefix    []byte // 4-byte sender pubkey prefix, TxtTypeSignedPlain only
 	SenderTimestamp uint32
 	Text            string
 }
@@ -167,6 +178,7 @@ type ChannelMsgRecvResponse struct {
 	ChannelIdx      byte
 	PathLen         byte
 	TxtType         byte
+	SenderPrefix    []byte // 4-byte sender pubkey prefix, TxtTypeSignedPlain only
 	SenderTimestamp uint32
 	Text            string
 }
@@ -176,6 +188,7 @@ type ContactMsgRecvV3Response struct {
 	PubKeyPrefix    [6]byte
 	PathLen         byte
 	TxtType         byte
+	SenderPrefix    []byte // 4-byte sender pubkey prefix, TxtTypeSignedPlain only
 	SenderTimestamp uint32
 	Text            string
 }
@@ -185,6 +198,7 @@ type ChannelMsgRecvV3Response struct {
 	ChannelIdx      byte
 	PathLen         byte
 	TxtType         byte
+	SenderPrefix    []byte // 4-byte sender pubkey prefix, TxtTypeSignedPlain only
 	SenderTimestamp uint32
 	Text            string
 }
@@ -249,8 +263,14 @@ type PushRawDataResponse struct {
 	Payload  []byte
 }
 
+// PushLoginSuccessResponse reports a successful login.
 type PushLoginSuccessResponse struct {
-	PubKeyPrefix [6]byte
+	Permissions   byte // e.g. is_admin
+	PubKeyPrefix  [6]byte
+	HasServerInfo bool
+	ServerTime    uint32 // login tag
+	ACL           byte   // v7+
+	FirmwareLevel byte   // server FIRMWARE_VER_LEVEL
 }
 
 type PushStatusResp struct {
@@ -341,8 +361,66 @@ type PushContactsFullResponse struct{}
 // companion_radio/MyMesh.cpp). Dividing by 4 recovers real dB with exact
 // 0.25 dB resolution. Per-hop trace PathSnrs are left raw; decode them with
 // meshcore.PathSNRdB.
-func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
+func snrDBFromWire(b int8) float32 { return meshcore.SNRFromWire(b) }
 
+// pathByteLen decodes the firmware path_len byte.
+func pathByteLen(pathLen byte) int { return int(pathLen&63) * (int(pathLen>>6) + 1) }
+
+var responseParsers = map[byte]func([]byte) (any, error){
+	RespOk:                    parser(ParseOkResponse),
+	RespErr:                   parser(ParseErrResponse),
+	RespContactsStart:         parser(ParseContactsStartResponse),
+	RespContact:               parser(ParseContactResponse),
+	RespEndOfContacts:         parser(ParseEndOfContactsResponse),
+	RespSelfInfo:              parser(ParseSelfInfoResponse),
+	RespDeviceInfo:            parser(ParseDeviceInfoResponse),
+	RespBattAndStorage:        parser(ParseBattAndStorageResponse),
+	RespSent:                  parser(ParseSentResponse),
+	RespCurrTime:              parser(ParseCurrTimeResponse),
+	RespNoMoreMessages:        parser(ParseNoMoreMessagesResponse),
+	RespContactMsgRecv:        parser(ParseContactMsgRecvResponse),
+	RespChannelMsgRecv:        parser(ParseChannelMsgRecvResponse),
+	RespContactMsgRecvV3:      parser(ParseContactMsgRecvV3Response),
+	RespChannelMsgRecvV3:      parser(ParseChannelMsgRecvV3Response),
+	RespChannelInfo:           parser(ParseChannelInfoResponse),
+	RespExportContact:         parser(ParseExportContactResponse),
+	RespPrivateKey:            parser(ParsePrivateKeyResponse),
+	RespDisabled:              parser(ParseDisabledResponse),
+	RespSignStart:             parser(ParseSignStartResponse),
+	RespSignature:             parser(ParseSignatureResponse),
+	RespCustomVars:            parser(ParseCustomVarsResponse),
+	RespAdvertPath:            parser(ParseAdvertPathResponse),
+	RespTuningParams:          parser(ParseTuningParamsResponse),
+	RespStats:                 parser(ParseStatsResponse),
+	RespAutoAddConfig:         parser(ParseAutoAddConfigResponse),
+	RespAllowedRepeatFreq:     parser(ParseAllowedRepeatFreqResponse),
+	RespChannelDataRecv:       parser(ParseChannelDataRecvResponse),
+	PushAdvert:                parser(ParsePushAdvertResponse),
+	PushPathUpdated:           parser(ParsePushPathUpdatedResponse),
+	PushSendConfirmed:         parser(ParsePushSendConfirmedResponse),
+	PushMsgWaiting:            parser(ParsePushMsgWaitingResponse),
+	PushRawData:               parser(ParsePushRawDataResponse),
+	PushLoginSuccess:          parser(ParsePushLoginSuccessResponse),
+	PushStatusResponse:        parser(ParsePushStatusResp),
+	PushLogRxData:             parser(ParsePushLogRxDataResponse),
+	PushTraceData:             parser(ParsePushTraceDataResponse),
+	PushNewAdvert:             parser(ParsePushNewAdvertResponse),
+	PushTelemetryResponse:     parser(ParsePushTelemetryResp),
+	PushBinaryResponse:        parser(ParsePushBinaryResp),
+	PushPathDiscoveryResponse: parser(ParsePushPathDiscoveryResp),
+	PushControlData:           parser(ParsePushControlDataResp),
+	RespDefaultFloodScope:     parser(ParseDefaultFloodScopeResponse),
+	PushLoginFail:             parser(ParsePushLoginFailResponse),
+	PushContactDeleted:        parser(ParsePushContactDeletedResponse),
+	PushContactsFull:          parser(ParsePushContactsFullResponse),
+}
+
+// parser adapts a typed payload parser to the responseParsers signature.
+func parser[T any](f func([]byte) (T, error)) func([]byte) (any, error) {
+	return func(b []byte) (any, error) { return f(b) }
+}
+
+// ParseResponse decodes one companion frame body; unknown codes keep a copy of the raw payload in Data.
 func ParseResponse(frameData []byte) (Response, error) {
 	if len(frameData) == 0 {
 		return Response{}, fmt.Errorf("frame data cannot be empty")
@@ -351,288 +429,17 @@ func ParseResponse(frameData []byte) (Response, error) {
 	code := frameData[0]
 	payload := frameData[1:]
 
-	switch code {
-	case RespOk:
-		parsed, err := ParseOkResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespErr:
-		parsed, err := ParseErrResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespContactsStart:
-		parsed, err := ParseContactsStartResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespContact:
-		parsed, err := ParseContactResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespEndOfContacts:
-		parsed, err := ParseEndOfContactsResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespSelfInfo:
-		parsed, err := ParseSelfInfoResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespDeviceInfo:
-		parsed, err := ParseDeviceInfoResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespBattAndStorage:
-		parsed, err := ParseBattAndStorageResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespSent:
-		parsed, err := ParseSentResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespCurrTime:
-		parsed, err := ParseCurrTimeResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespNoMoreMessages:
-		parsed, err := ParseNoMoreMessagesResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespContactMsgRecv:
-		parsed, err := ParseContactMsgRecvResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespChannelMsgRecv:
-		parsed, err := ParseChannelMsgRecvResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespContactMsgRecvV3:
-		parsed, err := ParseContactMsgRecvV3Response(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespChannelMsgRecvV3:
-		parsed, err := ParseChannelMsgRecvV3Response(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespChannelInfo:
-		parsed, err := ParseChannelInfoResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespExportContact:
-		parsed, err := ParseExportContactResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespPrivateKey:
-		parsed, err := ParsePrivateKeyResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespDisabled:
-		parsed, err := ParseDisabledResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespSignStart:
-		parsed, err := ParseSignStartResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespSignature:
-		parsed, err := ParseSignatureResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespCustomVars:
-		parsed, err := ParseCustomVarsResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespAdvertPath:
-		parsed, err := ParseAdvertPathResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespTuningParams:
-		parsed, err := ParseTuningParamsResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespStats:
-		parsed, err := ParseStatsResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespAutoAddConfig:
-		parsed, err := ParseAutoAddConfigResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespAllowedRepeatFreq:
-		parsed, err := ParseAllowedRepeatFreqResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespChannelDataRecv:
-		parsed, err := ParseChannelDataRecvResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushAdvert:
-		parsed, err := ParsePushAdvertResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushPathUpdated:
-		parsed, err := ParsePushPathUpdatedResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushSendConfirmed:
-		parsed, err := ParsePushSendConfirmedResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushMsgWaiting:
-		parsed, err := ParsePushMsgWaitingResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushRawData:
-		parsed, err := ParsePushRawDataResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushLoginSuccess:
-		parsed, err := ParsePushLoginSuccessResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushStatusResponse:
-		parsed, err := ParsePushStatusResp(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushLogRxData:
-		parsed, err := ParsePushLogRxDataResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushTraceData:
-		parsed, err := ParsePushTraceDataResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushNewAdvert:
-		parsed, err := ParsePushNewAdvertResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushTelemetryResponse:
-		parsed, err := ParsePushTelemetryResp(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushBinaryResponse:
-		parsed, err := ParsePushBinaryResp(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushPathDiscoveryResponse:
-		parsed, err := ParsePushPathDiscoveryResp(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushControlData:
-		parsed, err := ParsePushControlDataResp(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case RespDefaultFloodScope:
-		parsed, err := ParseDefaultFloodScopeResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushLoginFail:
-		parsed, err := ParsePushLoginFailResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushContactDeleted:
-		parsed, err := ParsePushContactDeletedResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	case PushContactsFull:
-		parsed, err := ParsePushContactsFullResponse(payload)
-		if err != nil {
-			return Response{}, err
-		}
-		return Response{Code: code, Data: parsed}, nil
-	default:
+	p, ok := responseParsers[code]
+	if !ok {
 		raw := make([]byte, len(payload))
 		copy(raw, payload)
 		return Response{Code: code, Data: raw}, nil
 	}
+	parsed, err := p(payload)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{Code: code, Data: parsed}, nil
 }
 
 func ParseOkResponse(data []byte) (OkResponse, error) {
@@ -697,8 +504,12 @@ func ParseContactResponse(data []byte) (ContactResponse, error) {
 	return resp, nil
 }
 
-func ParseEndOfContactsResponse(_ []byte) (EndOfContactsResponse, error) {
-	return EndOfContactsResponse{}, nil
+func ParseEndOfContactsResponse(data []byte) (EndOfContactsResponse, error) {
+	var resp EndOfContactsResponse
+	if len(data) >= 4 {
+		resp.MostRecentLastmod = binary.LittleEndian.Uint32(data[:4])
+	}
+	return resp, nil
 }
 
 func ParseSelfInfoResponse(data []byte) (SelfInfoResponse, error) {
@@ -749,16 +560,24 @@ func ParseDeviceInfoResponse(data []byte) (DeviceInfoResponse, error) {
 		return resp, nil
 	}
 
+	// v3+: ver(1) max_contacts/2(1) max_channels(1) ble_pin(4) build_date(12) model(40) version(20) repeat(1) hash_mode(1)
 	if len(data) < 19 {
 		return DeviceInfoResponse{}, fmt.Errorf("device info payload too short: got %d, need at least 19", len(data))
 	}
-
-	idx := 1
-	idx += 6
-	resp.FirmwareBuildDate = readCString(data[idx : idx+12])
-	idx += 12
-	resp.Model = string(data[idx:])
-
+	resp.MaxContacts = uint16(data[1]) * 2
+	resp.MaxChannels = data[2]
+	resp.BLEPin = binary.LittleEndian.Uint32(data[3:7])
+	resp.FirmwareBuildDate = readCString(data[7:19])
+	resp.Model = readCString(data[19:min(len(data), 59)])
+	if len(data) > 59 {
+		resp.FirmwareVersionStr = readCString(data[59:min(len(data), 79)])
+	}
+	if len(data) > 79 {
+		resp.RepeatEnabled = data[79] != 0
+	}
+	if len(data) > 80 {
+		resp.PathHashMode = data[80]
+	}
 	return resp, nil
 }
 
@@ -808,7 +627,7 @@ func ParseAdvertPathResponse(data []byte) (AdvertPathResponse, error) {
 		return AdvertPathResponse{}, fmt.Errorf("advert path payload too short: got %d, need at least 5", len(data))
 	}
 
-	pathLen := int(data[4])
+	pathLen := pathByteLen(data[4])
 	if len(data) < 5+pathLen {
 		return AdvertPathResponse{}, fmt.Errorf("advert path payload too short: got %d, need at least %d", len(data), 5+pathLen)
 	}
@@ -904,6 +723,16 @@ func ParseNoMoreMessagesResponse(_ []byte) (NoMoreMessagesResponse, error) {
 	return NoMoreMessagesResponse{}, nil
 }
 
+// splitSignedText strips the 4-byte sender prefix the firmware puts before TxtTypeSignedPlain text.
+func splitSignedText(txtType byte, rest []byte) (prefix []byte, text string) {
+	if txtType == TxtTypeSignedPlain && len(rest) >= 4 {
+		prefix = make([]byte, 4)
+		copy(prefix, rest[:4])
+		rest = rest[4:]
+	}
+	return prefix, string(rest)
+}
+
 func ParseContactMsgRecvResponse(data []byte) (ContactMsgRecvResponse, error) {
 	if len(data) < 12 {
 		return ContactMsgRecvResponse{}, fmt.Errorf("contact msg recv payload too short: got %d, need at least 12", len(data))
@@ -914,7 +743,7 @@ func ParseContactMsgRecvResponse(data []byte) (ContactMsgRecvResponse, error) {
 	resp.PathLen = data[6]
 	resp.TxtType = data[7]
 	resp.SenderTimestamp = binary.LittleEndian.Uint32(data[8:12])
-	resp.Text = string(data[12:])
+	resp.SenderPrefix, resp.Text = splitSignedText(resp.TxtType, data[12:])
 	return resp, nil
 }
 
@@ -928,8 +757,8 @@ func ParseChannelMsgRecvResponse(data []byte) (ChannelMsgRecvResponse, error) {
 		PathLen:         data[1],
 		TxtType:         data[2],
 		SenderTimestamp: binary.LittleEndian.Uint32(data[3:7]),
-		Text:            string(data[7:]),
 	}
+	resp.SenderPrefix, resp.Text = splitSignedText(resp.TxtType, data[7:])
 	return resp, nil
 }
 
@@ -944,7 +773,7 @@ func ParseContactMsgRecvV3Response(data []byte) (ContactMsgRecvV3Response, error
 	resp.PathLen = data[9]
 	resp.TxtType = data[10]
 	resp.SenderTimestamp = binary.LittleEndian.Uint32(data[11:15])
-	resp.Text = string(data[15:])
+	resp.SenderPrefix, resp.Text = splitSignedText(resp.TxtType, data[15:])
 	return resp, nil
 }
 
@@ -959,8 +788,8 @@ func ParseChannelMsgRecvV3Response(data []byte) (ChannelMsgRecvV3Response, error
 		PathLen:         data[4],
 		TxtType:         data[5],
 		SenderTimestamp: binary.LittleEndian.Uint32(data[6:10]),
-		Text:            string(data[10:]),
 	}
+	resp.SenderPrefix, resp.Text = splitSignedText(resp.TxtType, data[10:])
 	return resp, nil
 }
 
@@ -1102,8 +931,18 @@ func ParsePushLoginSuccessResponse(data []byte) (PushLoginSuccessResponse, error
 		return PushLoginSuccessResponse{}, fmt.Errorf("push login success payload too short: got %d, need at least 7", len(data))
 	}
 
-	var resp PushLoginSuccessResponse
+	resp := PushLoginSuccessResponse{Permissions: data[0]}
 	copy(resp.PubKeyPrefix[:], data[1:7])
+	if len(data) >= 11 {
+		resp.HasServerInfo = true
+		resp.ServerTime = binary.LittleEndian.Uint32(data[7:11])
+	}
+	if len(data) >= 12 {
+		resp.ACL = data[11]
+	}
+	if len(data) >= 13 {
+		resp.FirmwareLevel = data[12]
+	}
 	return resp, nil
 }
 
@@ -1139,27 +978,26 @@ func ParsePushTraceDataResponse(data []byte) (PushTraceDataResponse, error) {
 	}
 
 	pathLen := int(data[1])
-	need := 11 + (pathLen * 2) + 1
+	flags := data[2]
+	snrLen := pathLen >> (flags & 0x03)
+	need := 11 + pathLen + snrLen + 1
 	if len(data) < need {
 		return PushTraceDataResponse{}, fmt.Errorf("push trace data payload too short: got %d, need at least %d", len(data), need)
 	}
 
-	idx := 2
 	resp := PushTraceDataResponse{
-		PathLen: data[1],
-		Flags:   data[idx],
+		PathLen:  data[1],
+		Flags:    flags,
+		Tag:      binary.LittleEndian.Uint32(data[3:7]),
+		AuthCode: binary.LittleEndian.Uint32(data[7:11]),
 	}
-	idx++
-	resp.Tag = binary.LittleEndian.Uint32(data[idx : idx+4])
-	idx += 4
-	resp.AuthCode = binary.LittleEndian.Uint32(data[idx : idx+4])
-	idx += 4
+	idx := 11
 	resp.PathHashes = make([]byte, pathLen)
 	copy(resp.PathHashes, data[idx:idx+pathLen])
 	idx += pathLen
-	resp.PathSnrs = make([]byte, pathLen)
-	copy(resp.PathSnrs, data[idx:idx+pathLen])
-	idx += pathLen
+	resp.PathSnrs = make([]byte, snrLen)
+	copy(resp.PathSnrs, data[idx:idx+snrLen])
+	idx += snrLen
 	resp.LastSNR = snrDBFromWire(int8(data[idx]))
 
 	return resp, nil
@@ -1228,7 +1066,7 @@ func ParsePushPathDiscoveryResp(data []byte) (PushPathDiscoveryResp, error) {
 	resp.OutPathLen = data[7]
 
 	idx := 8
-	outPathLen := int(resp.OutPathLen)
+	outPathLen := pathByteLen(resp.OutPathLen)
 	if len(data) < idx+outPathLen+1 {
 		return PushPathDiscoveryResp{}, fmt.Errorf("push path discovery response payload too short: got %d, need at least %d", len(data), idx+outPathLen+1)
 	}
@@ -1239,7 +1077,7 @@ func ParsePushPathDiscoveryResp(data []byte) (PushPathDiscoveryResp, error) {
 
 	resp.InPathLen = data[idx]
 	idx++
-	inPathLen := int(resp.InPathLen)
+	inPathLen := pathByteLen(resp.InPathLen)
 	if len(data) < idx+inPathLen {
 		return PushPathDiscoveryResp{}, fmt.Errorf("push path discovery response payload too short: got %d, need at least %d", len(data), idx+inPathLen)
 	}
