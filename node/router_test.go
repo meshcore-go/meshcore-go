@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
@@ -74,7 +75,7 @@ func TestRouter_FloodForward(t *testing.T) {
 		},
 	})
 
-	pkt := mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeAdvert, []byte{0xAA, 0xBB}))
+	pkt := mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{0xAA, 0xBB}))
 	if got := r.route(pkt); got != RouteActionDeliver {
 		t.Fatalf("route() = %v, want %v", got, RouteActionDeliver)
 	}
@@ -105,7 +106,7 @@ func TestRouter_FloodNoForwardByDefault(t *testing.T) {
 		},
 	})
 
-	pkt := mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeAdvert, []byte{0x01}))
+	pkt := mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{0x01}))
 	if got := r.route(pkt); got != RouteActionDeliver {
 		t.Fatalf("route() = %v, want %v", got, RouteActionDeliver)
 	}
@@ -117,7 +118,7 @@ func TestRouter_FloodNoForwardByDefault(t *testing.T) {
 func TestRouter_FloodPathFull(t *testing.T) {
 	called := false
 	path := bytes.Repeat([]byte{0xAA, 0xBB}, meshcore.MaxPathSize/2)
-	pkt := mustPacketFromBytes(t, makePacketWithPath(meshcore.RouteTypeFlood, meshcore.PayloadTypeAdvert, 0x60, path, []byte{0x01}))
+	pkt := mustPacketFromBytes(t, makePacketWithPath(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0x60, path, []byte{0x01}))
 	r := newTestRouter(testRouterOpts{
 		identity:     seedIdentity(0x01),
 		allowForward: func(*meshcore.Packet) bool { return true },
@@ -255,15 +256,166 @@ func TestRouter_NonFloodNonDirect_Dedup(t *testing.T) {
 	}
 }
 
-func TestRouter_DirectAddressedNoForward(t *testing.T) {
+func TestRouter_DirectNextHopNoForward_Dropped(t *testing.T) {
 	identity := seedIdentity(0x01)
 	other := seedIdentity(0x02)
 	r := newTestRouter(testRouterOpts{identity: identity})
 
 	path := []byte{identity.Hash()[0], other.Hash()[0]}
-	pkt := mustPacketFromBytes(t, makeDirectPacket(meshcore.PayloadTypeAdvert, path, []byte{0x55}))
-	if got := r.route(pkt); got != RouteActionDeliver {
-		t.Fatalf("route() = %v, want %v (addressed to us, no forward → deliver)", got, RouteActionDeliver)
+	pkt := mustPacketFromBytes(t, makeDirectPacket(meshcore.PayloadTypeTxtMsg, path, []byte{0x55}))
+	if got := r.route(pkt); got != RouteActionDrop {
+		t.Fatalf("route() = %v, want %v (hops remaining, no forward → drop)", got, RouteActionDrop)
+	}
+
+	r = newTestRouter(testRouterOpts{identity: identity, allowPacket: func(*meshcore.Packet) bool { return true }})
+	if got := r.route(mustPacketFromBytes(t, makeDirectPacket(meshcore.PayloadTypeTxtMsg, path, []byte{0x55}))); got != RouteActionDeliver {
+		t.Fatalf("route() = %v, want %v (allowPacket opts in)", got, RouteActionDeliver)
+	}
+}
+
+func TestRouter_FloodForwardPolicy(t *testing.T) {
+	cases := []struct {
+		name    string
+		typ     byte
+		forward bool
+	}{
+		{"ACK", meshcore.PayloadTypeAck, true},
+		{"PATH", meshcore.PayloadTypePath, true},
+		{"REQ", meshcore.PayloadTypeReq, true},
+		{"RESPONSE", meshcore.PayloadTypeResponse, true},
+		{"TXT_MSG", meshcore.PayloadTypeTxtMsg, true},
+		{"ANON_REQ", meshcore.PayloadTypeAnonReq, true},
+		{"GRP_TXT", meshcore.PayloadTypeGrpTxt, true},
+		{"GRP_DATA", meshcore.PayloadTypeGrpData, true},
+		{"ADVERT_garbage", meshcore.PayloadTypeAdvert, false},
+		{"TRACE", meshcore.PayloadTypeTrace, false},
+		{"MULTIPART", meshcore.PayloadTypeMultiPart, false},
+		{"CONTROL", meshcore.PayloadTypeControl, false},
+		{"RAW_CUSTOM", meshcore.PayloadTypeRawCustom, false},
+		{"unknown_0x0C", 0x0C, false},
+		{"unknown_0x0E", 0x0E, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sends := 0
+			r := newTestRouter(testRouterOpts{
+				identity:     seedIdentity(0x01),
+				allowForward: func(*meshcore.Packet) bool { return true },
+				send:         func([]byte, uint8) error { sends++; return nil },
+			})
+			pkt := mustPacketFromBytes(t, makeFloodPacket(tc.typ, []byte{0x01, 0x02, 0x03, 0x04, 0x05}))
+			if got := r.route(pkt); got != RouteActionDeliver {
+				t.Fatalf("route() = %v, want %v (flood packets are always delivered)", got, RouteActionDeliver)
+			}
+			if (sends == 1) != tc.forward {
+				t.Fatalf("sends = %d, want forward=%v", sends, tc.forward)
+			}
+		})
+	}
+}
+
+func TestRouter_FloodAdvertForwardOnlyWhenVerified(t *testing.T) {
+	self := seedIdentity(0x01)
+	other := seedIdentity(0x02)
+	newRouter := func(sends *int) *router {
+		return newTestRouter(testRouterOpts{
+			identity:     self,
+			allowForward: func(*meshcore.Packet) bool { return true },
+			send:         func([]byte, uint8) error { *sends++; return nil },
+		})
+	}
+	advertPacket := func(t *testing.T, adv *meshcore.Advert) *meshcore.Packet {
+		payload, err := adv.ToBytes()
+		if err != nil {
+			t.Fatalf("Advert.ToBytes() error = %v", err)
+		}
+		return mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeAdvert, payload))
+	}
+
+	var sends int
+	newRouter(&sends).route(advertPacket(t, makeSignedAdvert(other, 100, "peer")))
+	if sends != 1 {
+		t.Fatalf("valid advert: sends = %d, want 1", sends)
+	}
+
+	sends = 0
+	forged := makeSignedAdvert(other, 100, "peer")
+	forged.Signature[0] ^= 0xFF
+	newRouter(&sends).route(advertPacket(t, forged))
+	if sends != 0 {
+		t.Fatalf("forged advert: sends = %d, want 0", sends)
+	}
+
+	sends = 0
+	newRouter(&sends).route(advertPacket(t, makeSignedAdvert(self, 100, "me")))
+	if sends != 0 {
+		t.Fatalf("own advert: sends = %d, want 0", sends)
+	}
+}
+
+func TestRouter_DirectControlZeroHopOnly(t *testing.T) {
+	identity := seedIdentity(0x01)
+	sends := 0
+	r := newTestRouter(testRouterOpts{
+		identity:     identity,
+		allowForward: func(*meshcore.Packet) bool { return true },
+		sendDirect:   func([]byte) error { sends++; return nil },
+	})
+
+	withHops := makeDirectPacket(meshcore.PayloadTypeControl, []byte{identity.Hash()[0]}, []byte{0x80, 0x01})
+	if got := r.route(mustPacketFromBytes(t, withHops)); got != RouteActionDrop {
+		t.Fatalf("route(control, 1 hop) = %v, want %v", got, RouteActionDrop)
+	}
+	if sends != 0 {
+		t.Fatalf("sends = %d, want 0", sends)
+	}
+
+	zeroHop := makeDirectPacket(meshcore.PayloadTypeControl, nil, []byte{0x80, 0x01})
+	if got := r.route(mustPacketFromBytes(t, zeroHop)); got != RouteActionDeliver {
+		t.Fatalf("route(control, 0 hops) = %v, want %v", got, RouteActionDeliver)
+	}
+}
+
+// A relayed direct packet is re-transmitted but never handed to local handlers.
+func TestNode_DirectRelayNotDelivered(t *testing.T) {
+	identity := seedIdentity(0x01)
+	other := seedIdentity(0x02)
+	radio := &mockRadio{}
+	n := New(identity, radio, WithAllowForwardHandler(func(*meshcore.Packet) bool { return true }))
+	defer n.Stop()
+
+	delivered := false
+	n.OnPacket(meshcore.PayloadTypeTxtMsg, func(*meshcore.Packet) { delivered = true })
+
+	radio.inject(makeDirectPacket(meshcore.PayloadTypeTxtMsg, []byte{identity.Hash()[0], other.Hash()[0]}, []byte{0x01, 0x02, 0x03}))
+	time.Sleep(100 * time.Millisecond)
+
+	if delivered {
+		t.Fatal("relayed direct packet was delivered to local handlers")
+	}
+	if got := len(radio.sentData()); got != 1 {
+		t.Fatalf("relayed sends = %d, want 1", got)
+	}
+
+	// Path exhausted: delivered, not relayed.
+	radio.inject(makeDirectPacket(meshcore.PayloadTypeTxtMsg, nil, []byte{0x04, 0x05, 0x06}))
+	if !delivered {
+		t.Fatal("zero-hop direct packet was not delivered")
+	}
+}
+
+func TestRouter_ForwardErrorReported(t *testing.T) {
+	var got error
+	r := newTestRouter(testRouterOpts{
+		identity:     seedIdentity(0x01),
+		allowForward: func(*meshcore.Packet) bool { return true },
+		send:         func([]byte, uint8) error { return ErrTxQueueFull },
+	})
+	r.node.errH = func(err error) { got = err }
+
+	r.route(mustPacketFromBytes(t, makeFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{0x01})))
+	if got != ErrTxQueueFull {
+		t.Fatalf("error handler got %v, want %v", got, ErrTxQueueFull)
 	}
 }
 

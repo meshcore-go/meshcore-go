@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"testing"
 	"time"
@@ -227,8 +228,26 @@ func TestPeerTable_UpdateStoresPath(t *testing.T) {
 	pt.Update(makeSignedAdvert(id, 100, "pathtest"), 0, 0, false, path)
 
 	p := pt.Lookup(id.PublicKey())
-	if len(p.OutPath) != 3 || p.OutPath[0] != 0xAA || p.OutPath[1] != 0xBB || p.OutPath[2] != 0xCC {
-		t.Errorf("OutPath = %v, want [0xAA 0xBB 0xCC]", p.OutPath)
+	if !bytes.Equal(p.OutPath, []byte{0xCC, 0xBB, 0xAA}) {
+		t.Errorf("OutPath = %x, want ccbbaa", p.OutPath)
+	}
+	if p.OutPathHashSize != 1 {
+		t.Errorf("OutPathHashSize = %d, want 1", p.OutPathHashSize)
+	}
+}
+
+func TestPeerTable_UpdateWithHashSize_ReversesHopsNotBytes(t *testing.T) {
+	pt := NewPeerTable(10)
+	id := peerIdentity(0x32)
+	path := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF} // hops AABB, CCDD, EEFF
+	pt.UpdateWithHashSize(makeSignedAdvert(id, 100, "path2"), 0, 0, false, path, 2)
+
+	p := pt.Lookup(id.PublicKey())
+	if !bytes.Equal(p.OutPath, []byte{0xEE, 0xFF, 0xCC, 0xDD, 0xAA, 0xBB}) {
+		t.Errorf("OutPath = %x, want eeffccddaabb", p.OutPath)
+	}
+	if p.OutPathHashSize != 2 {
+		t.Errorf("OutPathHashSize = %d, want 2", p.OutPathHashSize)
 	}
 }
 

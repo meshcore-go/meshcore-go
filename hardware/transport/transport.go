@@ -2,10 +2,19 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/meshcore-go/meshcore-go/hardware"
+)
+
+var (
+	// ErrNotConnected is returned by Send before the first Connect.
+	ErrNotConnected = errors.New("transport: not connected")
+	// ErrClosed is returned by Send after Close.
+	ErrClosed = errors.New("transport: closed")
 )
 
 type FrameHandler = func(*hardware.KissFrame)
@@ -18,9 +27,7 @@ type Transport interface {
 	Send(data []byte) error
 	SetFrameHandler(func(*hardware.KissFrame))
 	SetErrorHandler(func(error))
-	// Dead returns a channel that is closed when the read loop has exited
-	// (due to I/O error or connection loss). Callers can select on this to
-	// detect that the transport is no longer receiving.
+	// Dead returns a channel closed when the current connection's read loop exits.
 	Dead() <-chan struct{}
 }
 
@@ -37,6 +44,119 @@ type readLoopConfig struct {
 	getFrameHandler func() FrameHandler
 	getErrorHandler func() ErrorHandler
 	beforeRead      beforeReadFunc
+}
+
+// session is the state of one Connect: its connection and read-loop channels.
+type session struct {
+	conn io.ReadWriteCloser // nil before the first Connect
+	done chan struct{}
+	dead chan struct{}
+	once sync.Once
+}
+
+func newSession(conn io.ReadWriteCloser) *session {
+	return &session{conn: conn, done: make(chan struct{}), dead: make(chan struct{})}
+}
+
+func (s *session) close() error {
+	var err error
+	s.once.Do(func() {
+		close(s.done)
+		if s.conn != nil {
+			err = s.conn.Close()
+		} else {
+			close(s.dead)
+		}
+	})
+	return err
+}
+
+func (s *session) closed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// base holds what the serial and TCP transports share.
+type base struct {
+	hMu     sync.RWMutex
+	onFrame FrameHandler
+	onError ErrorHandler
+
+	mu  sync.Mutex
+	cur *session
+
+	writeMu sync.Mutex
+}
+
+func newBase() base { return base{cur: newSession(nil)} }
+
+func (b *base) session() *session {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cur
+}
+
+// start installs conn as the current session, closes the previous one, and runs its read loop.
+func (b *base) start(conn io.ReadWriteCloser, cfg readLoopConfig) {
+	s := newSession(conn)
+	b.mu.Lock()
+	prev := b.cur
+	if prev.conn == nil && !prev.closed() {
+		s.done, s.dead = prev.done, prev.dead
+		prev = nil
+	}
+	b.cur = s
+	b.mu.Unlock()
+	if prev != nil {
+		_ = prev.close()
+	}
+	go readLoop(conn, s.done, s.dead, cfg)
+}
+
+// Close stops the current connection.
+func (b *base) Close() error { return b.session().close() }
+
+// Dead implements Transport.
+func (b *base) Dead() <-chan struct{} { return b.session().dead }
+
+// writer returns the current connection for Send.
+func (b *base) writer() (io.ReadWriteCloser, error) {
+	s := b.session()
+	if s.conn == nil {
+		return nil, ErrNotConnected
+	}
+	if s.closed() {
+		return nil, ErrClosed
+	}
+	return s.conn, nil
+}
+
+func (b *base) SetFrameHandler(h func(*hardware.KissFrame)) {
+	b.hMu.Lock()
+	b.onFrame = h
+	b.hMu.Unlock()
+}
+
+func (b *base) SetErrorHandler(h func(error)) {
+	b.hMu.Lock()
+	b.onError = h
+	b.hMu.Unlock()
+}
+
+func (b *base) frameHandler() FrameHandler {
+	b.hMu.RLock()
+	defer b.hMu.RUnlock()
+	return b.onFrame
+}
+
+func (b *base) errorHandler() ErrorHandler {
+	b.hMu.RLock()
+	defer b.hMu.RUnlock()
+	return b.onError
 }
 
 func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, cfg readLoopConfig) {
@@ -72,7 +192,11 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, cfg read
 
 		if cfg.beforeRead != nil {
 			if err := cfg.beforeRead(); err != nil {
-				dispatchErr(fmt.Errorf("set read deadline: %w", err))
+				select {
+				case <-done:
+				default:
+					dispatchErr(fmt.Errorf("set read deadline: %w", err))
+				}
 				return
 			}
 		}
@@ -107,10 +231,6 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, cfg read
 
 			dispatchErr(err)
 			return
-		}
-
-		if n == 0 {
-			continue
 		}
 	}
 }

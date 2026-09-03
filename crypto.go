@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
+	"errors"
 	"fmt"
 
 	"filippo.io/edwards25519"
@@ -14,6 +15,13 @@ import (
 const (
 	cipherKeySize = 16 // AES-128
 	cipherMACSize = 2  // truncated HMAC
+)
+
+var (
+	// ErrBadMAC is returned when the truncated HMAC does not match.
+	ErrBadMAC = errors.New("meshcore: mac mismatch")
+	// ErrTooShort is returned when a payload is shorter than its fixed header.
+	ErrTooShort = errors.New("meshcore: data too short")
 )
 
 // DeriveSharedSecret computes an X25519 shared secret from an Ed25519
@@ -53,8 +61,6 @@ func deriveExpandedPubKey(scalar []byte) []byte {
 
 // signWithExpandedKey produces an RFC 8032 signature directly from an expanded
 // private key (clamped scalar ‖ prefix); crypto/ed25519 can only sign from a seed.
-// ponytail: no error return — the scalar is length-checked at construction and
-// SetUniformBytes always gets a 64-byte SHA-512 sum, so neither call can fail.
 func signWithExpandedKey(scalar, prefix, pub, message []byte) []byte {
 	a, _ := edwards25519.NewScalar().SetBytesWithClamping(scalar)
 
@@ -171,19 +177,30 @@ func EncryptThenMAC(sharedSecret []byte, src []byte) ([]byte, error) {
 
 // MACThenDecrypt verifies the 2-byte HMAC-SHA256 MAC, then decrypts.
 // src must be: [MAC (2 bytes)] [encrypted data].
-// Returns nil if the MAC is invalid.
+// Returns ErrBadMAC if the MAC is invalid, ErrTooShort if src has no ciphertext.
 func MACThenDecrypt(sharedSecret []byte, src []byte) ([]byte, error) {
 	if len(src) <= cipherMACSize {
-		return nil, fmt.Errorf("data too short: %d bytes", len(src))
+		return nil, fmt.Errorf("%w: %d bytes", ErrTooShort, len(src))
 	}
 
 	mac := hmac.New(sha256.New, sharedSecret)
 	mac.Write(src[cipherMACSize:])
 	computed := mac.Sum(nil)
 
-	if computed[0] != src[0] || computed[1] != src[1] {
-		return nil, nil
+	if !hmac.Equal(computed[:cipherMACSize], src[:cipherMACSize]) {
+		return nil, ErrBadMAC
 	}
 
 	return Decrypt(sharedSecret, src[cipherMACSize:])
+}
+
+// macDecryptErr is MACThenDecrypt for split MAC/ciphertext fields.
+func macDecryptErr(key []byte, mac [2]byte, enc []byte) ([]byte, error) {
+	return MACThenDecrypt(key, append(mac[:], enc...))
+}
+
+// macDecrypt is macDecryptErr with a nil-on-failure result.
+func macDecrypt(key []byte, mac [2]byte, enc []byte) []byte {
+	plain, _ := macDecryptErr(key, mac, enc)
+	return plain
 }

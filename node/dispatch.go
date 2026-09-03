@@ -11,7 +11,9 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 	default:
 	}
 
-	n.retries.handlePacket(pkt)
+	if n.retries.handlePacket(pkt) {
+		return
+	}
 
 	// Early ACK receive: process ACKs on direct-routed packets before
 	// routing decisions — matches C++ firmware behavior. This lets us
@@ -28,8 +30,7 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 		return
 	}
 
-	action := n.router.route(pkt)
-	if action == RouteActionDrop {
+	if n.router.route(pkt) != RouteActionDeliver {
 		return
 	}
 
@@ -52,7 +53,7 @@ func (n *Node) handleAdvert(pkt *meshcore.Packet) {
 		return
 	}
 
-	if n.getIdentity().Matches(adv.PublicKey) {
+	if n.Identity().Matches(adv.PublicKey) {
 		return
 	}
 
@@ -60,7 +61,7 @@ func (n *Node) handleAdvert(pkt *meshcore.Packet) {
 		return
 	}
 
-	n.peers.Update(adv, pkt.SNR, pkt.RSSI, pkt.HasSignalInfo, pkt.Path)
+	n.peers.UpdateWithHashSize(adv, pkt.SNR, pkt.RSSI, pkt.HasSignalInfo, pkt.Path, pkt.PathHashSize())
 }
 
 func (n *Node) dispatchPacket(pkt *meshcore.Packet) {

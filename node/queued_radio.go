@@ -33,9 +33,9 @@ func WithQueuedRadioErrorHandler(h func(error)) QueuedRadioOption {
 	}
 }
 
-func WithQueuedRadioMaxQueue(max int) QueuedRadioOption {
+func WithQueuedRadioMaxQueue(size int) QueuedRadioOption {
 	return func(c *queuedRadioConfig) {
-		c.txOpts = append(c.txOpts, withTxMaxQueue(max))
+		c.txOpts = append(c.txOpts, withTxMaxQueue(size))
 	}
 }
 

@@ -15,35 +15,51 @@ type Packet struct {
 	TransportCode1 uint16 // Little Endian
 	TransportCode2 uint16 // Little Endian
 
-	SNR           float32 // Real decibels. See snrDBFromWire for the wire format.
+	SNR           float32 // Real decibels. See SNRFromWire for the wire format.
 	RSSI          int8
 	HasSignalInfo bool
-
-	pathHashSize  uint8
-	pathHashCount uint8
 }
 
-// snrDBFromWire converts an on-wire SNR byte to real decibels.
+// SNRFromWire converts an on-wire SNR byte to real decibels.
 //
 // MeshCore firmware encodes SNR in quarter-dB units: it sends
 // (int8)round(snr_dB * 4) (see MeshCore Packet.h getSNR()/_snr,
 // Dispatcher.cpp _snr = getLastSNR()*4, and the companion/KISS frame
 // builders). Dividing by 4 recovers real dB with exact 0.25 dB resolution.
-func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
+func SNRFromWire(b int8) float32 { return float32(b) / 4 }
+
+func snrDBFromWire(b int8) float32 { return SNRFromWire(b) }
 
 // PathSNRdB decodes a single per-hop SNR byte from a trace Path (or a
 // companion PushTraceDataResponse.PathSnrs slice) into real decibels. These
 // path bytes are kept in their raw on-wire quarter-dB form; use this helper
-// to convert them. See snrDBFromWire for the wire format.
-func PathSNRdB(b byte) float32 { return snrDBFromWire(int8(b)) }
+// to convert them. See SNRFromWire for the wire format.
+func PathSNRdB(b byte) float32 { return SNRFromWire(int8(b)) }
 
 func MakeHeader(routeType, payloadType, payloadVer byte) byte {
 	return (payloadVer << 6) | (payloadType << 2) | routeType
 }
 
+// pathLenFields splits a path_len byte into bytes-per-hop (bits 6-7, plus 1) and hop count (bits 0-5).
+func pathLenFields(pathLen uint8) (hashSize, hashCount uint8) {
+	return pathLen>>6 + 1, pathLen & 63
+}
+
+// splitPathHashes tolerates a path shorter than hashSize*hashCount, yielding fewer hashes.
+func splitPathHashes(path []byte, hashSize, hashCount uint8) [][]byte {
+	hashes := make([][]byte, 0, hashCount)
+	for i := range int(hashCount) {
+		start, end := i*int(hashSize), (i+1)*int(hashSize)
+		if end > len(path) {
+			break
+		}
+		hashes = append(hashes, path[start:end])
+	}
+	return hashes
+}
+
 func IsValidPathLen(pathLen uint8) bool {
-	hashCount := pathLen & 63
-	hashSize := (pathLen >> 6) + 1
+	hashSize, hashCount := pathLenFields(pathLen)
 	if hashSize == 4 {
 		return false
 	}
@@ -59,6 +75,10 @@ func PacketFromBytes(data []byte) (*Packet, error) {
 		return nil, fmt.Errorf("reading header: %w", err)
 	}
 	packet.Header = headerByte
+
+	if v := packet.PayloadVer(); v != 0 {
+		return nil, fmt.Errorf("unsupported payload version %d", v)
+	}
 
 	routeType := headerByte & PacketRouteMask
 	hasTransportCodes := routeType == RouteTypeTransportFlood || routeType == RouteTypeTransportDirect
@@ -82,9 +102,7 @@ func PacketFromBytes(data []byte) (*Packet, error) {
 		return nil, fmt.Errorf("invalid path length byte: 0x%02x", pathLenByte)
 	}
 
-	packet.pathHashSize = pathLenByte>>6 + 1
-	packet.pathHashCount = pathLenByte & 63
-	pathByteLength := int(packet.pathHashCount) * int(packet.pathHashSize)
+	pathByteLength := int(packet.PathHashCount()) * int(packet.PathHashSize())
 
 	if buffer.Len() < pathByteLength {
 		return nil, fmt.Errorf("not enough data for path: need %d bytes, have %d", pathByteLength, buffer.Len())
@@ -134,24 +152,22 @@ func (p *Packet) ToBytes() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-func (p *Packet) PathHashSize() uint8 {
-	return p.pathHashSize
-}
+// PathHashSize returns the per-hop hash size in bytes (1-3).
+func (p *Packet) PathHashSize() uint8 { s, _ := pathLenFields(p.PathLength); return s }
 
-func (p *Packet) PathHashCount() uint8 {
-	return p.pathHashCount
-}
+// PathHashCount returns the hop count.
+func (p *Packet) PathHashCount() uint8 { _, c := pathLenFields(p.PathLength); return c }
 
 func (p *Packet) PathHashes() [][]byte {
-	var pathItems [][]byte
-	buffer := bytes.NewBuffer(p.Path)
+	return splitPathHashes(p.Path, p.PathHashSize(), p.PathHashCount())
+}
 
-	for i := 0; i < int(p.pathHashCount); i++ {
-		pathBytes := buffer.Next(int(p.pathHashSize))
-		pathItems = append(pathItems, pathBytes)
-	}
-
-	return pathItems
+// Clone returns a deep copy of the packet.
+func (p *Packet) Clone() *Packet {
+	c := *p
+	c.Path = bytes.Clone(p.Path)
+	c.Payload = bytes.Clone(p.Payload)
+	return &c
 }
 
 func (p *Packet) RouteType() byte {
@@ -242,30 +258,28 @@ func (p *Packet) IsTransport() bool {
 // AppendPathHash appends a path hash to the packet's path. It returns false
 // if the path is already full (would exceed MaxPathSize).
 func (p *Packet) AppendPathHash(hash []byte) bool {
-	hashSize := int(p.PathHashSize())
-	if len(hash) < hashSize {
+	hashSize, count := pathLenFields(p.PathLength)
+	if len(hash) < int(hashSize) {
 		return false
 	}
-	newCount := int(p.pathHashCount) + 1
-	if newCount*hashSize > MaxPathSize {
+	newCount := int(count) + 1
+	if newCount*int(hashSize) > MaxPathSize {
 		return false
 	}
 	p.Path = append(p.Path, hash[:hashSize]...)
-	p.pathHashCount = uint8(newCount)
-	p.PathLength = (p.pathHashSize-1)<<6 | p.pathHashCount
+	p.PathLength = (hashSize-1)<<6 | uint8(newCount)
 	return true
 }
 
 // RemoveFirstPathHash removes the first hash from the packet's path,
 // shifting remaining hashes left. Returns false if the path is empty.
 func (p *Packet) RemoveFirstPathHash() bool {
-	if p.pathHashCount == 0 {
+	hashSize, count := pathLenFields(p.PathLength)
+	if count == 0 || len(p.Path) < int(hashSize) {
 		return false
 	}
-	hashSize := int(p.pathHashSize)
 	p.Path = p.Path[hashSize:]
-	p.pathHashCount--
-	p.PathLength = (p.pathHashSize-1)<<6 | p.pathHashCount
+	p.PathLength = (hashSize-1)<<6 | (count - 1)
 	return true
 }
 

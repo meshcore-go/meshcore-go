@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"sync"
 	"testing"
 
@@ -81,9 +82,7 @@ func TestSecretCache_Concurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := sc.get(peer.Identity)
 			if err != nil {
 				t.Errorf("get error: %v", err)
@@ -92,9 +91,28 @@ func TestSecretCache_Concurrent(t *testing.T) {
 			if !bytes.Equal(got, want) {
 				t.Errorf("concurrent get returned wrong secret")
 			}
-		}()
+		})
 	}
 	wg.Wait()
+}
+
+func TestSecretCache_Bounded(t *testing.T) {
+	sc := newSecretCache(seedIdentity(0xAB))
+	for i := range maxCachedSecrets + 20 {
+		var seed [ed25519.SeedSize]byte
+		seed[0] = byte(i)
+		seed[1] = byte(i >> 8)
+		seed[2] = 0x5A
+		if _, err := sc.get(meshcore.NewLocalIdentityFromSeed(seed).Identity); err != nil {
+			t.Fatalf("get error: %v", err)
+		}
+	}
+	sc.mu.RLock()
+	n := len(sc.secrets)
+	sc.mu.RUnlock()
+	if n > maxCachedSecrets {
+		t.Fatalf("cache holds %d secrets, want <= %d", n, maxCachedSecrets)
+	}
 }
 
 func TestNode_SharedSecret(t *testing.T) {
@@ -127,5 +145,35 @@ func TestNode_SharedSecretSymmetric(t *testing.T) {
 
 	if !bytes.Equal(s1, s2) {
 		t.Error("shared secrets should be symmetric between two nodes")
+	}
+}
+
+func TestSecretCache_EvictsLeastRecentlyUsed(t *testing.T) {
+	sc := newSecretCache(seedIdentity(0xAB))
+	peer := func(i int) meshcore.Identity {
+		var seed [ed25519.SeedSize]byte
+		seed[0], seed[1], seed[2] = byte(i), byte(i>>8), 0x5A
+		return meshcore.NewLocalIdentityFromSeed(seed).Identity
+	}
+
+	for i := range maxCachedSecrets {
+		if _, err := sc.get(peer(i)); err != nil {
+			t.Fatalf("get error: %v", err)
+		}
+	}
+	if _, err := sc.get(peer(0)); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+	if _, err := sc.get(peer(maxCachedSecrets)); err != nil {
+		t.Fatalf("get error: %v", err)
+	}
+
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	if _, ok := sc.secrets[peer(1).PublicKey()]; ok {
+		t.Error("least recently used entry survived eviction")
+	}
+	if _, ok := sc.secrets[peer(0).PublicKey()]; !ok {
+		t.Error("recently used entry was evicted")
 	}
 }

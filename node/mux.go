@@ -147,9 +147,9 @@ func WithMuxErrorHandler(h func(error)) MuxOption {
 	}
 }
 
-func WithMuxMaxTxQueue(max int) MuxOption {
+func WithMuxMaxTxQueue(size int) MuxOption {
 	return func(c *muxConfig) {
-		c.txOpts = append(c.txOpts, withTxMaxQueue(max))
+		c.txOpts = append(c.txOpts, withTxMaxQueue(size))
 	}
 }
 
@@ -214,9 +214,11 @@ func (m *RadioMux) TxStats() TxStats {
 	return m.tx.stats()
 }
 
+// Stop shuts down the transmit engine and detaches from the modem; Node.Stop does not call it.
 func (m *RadioMux) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.done)
+		m.modem.SetDataHandler(nil)
 	})
 }
 
@@ -261,30 +263,11 @@ func (m *RadioMux) onData(data []byte, snr float32, rssi int8, hasSignalInfo boo
 
 	for _, v := range radios {
 		if v.wants(pkt) {
-			clone, err := clonePacket(pkt)
-			if err != nil {
-				continue
-			}
 			rawCopy := make([]byte, len(data))
 			copy(rawCopy, data)
-			v.deliver(clone, rawCopy, snr, rssi, hasSignalInfo)
+			v.deliver(pkt.Clone(), rawCopy, snr, rssi, hasSignalInfo)
 		}
 	}
-}
-
-func clonePacket(pkt *meshcore.Packet) (*meshcore.Packet, error) {
-	data, err := pkt.ToBytes()
-	if err != nil {
-		return nil, err
-	}
-	clone, err := meshcore.PacketFromBytes(data)
-	if err != nil {
-		return nil, err
-	}
-	clone.SNR = pkt.SNR
-	clone.RSSI = pkt.RSSI
-	clone.HasSignalInfo = pkt.HasSignalInfo
-	return clone, nil
 }
 
 var _ MuxRadio = (*virtualRadio)(nil)

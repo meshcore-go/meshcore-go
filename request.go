@@ -1,6 +1,6 @@
 package meshcore
 
-import "bytes"
+import "fmt"
 
 type Request struct {
 	Destination      byte
@@ -10,74 +10,26 @@ type Request struct {
 }
 
 func RequestFromBytes(data []byte) (*Request, error) {
-	buffer := bytes.NewBuffer(data)
-
-	dest, destErr := buffer.ReadByte()
-	if destErr != nil {
-		return nil, destErr
+	if len(data) < 4 {
+		return nil, fmt.Errorf("%w: request needs 4 header bytes, have %d", ErrTooShort, len(data))
 	}
-
-	src, srcErr := buffer.ReadByte()
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	var mac [2]byte
-	_, macErr := buffer.Read(mac[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	encryptedPayload := buffer.Bytes()
-
 	return &Request{
-		Destination:      dest,
-		Source:           src,
-		MAC:              mac,
-		EncryptedPayload: encryptedPayload,
+		Destination:      data[0],
+		Source:           data[1],
+		MAC:              [2]byte{data[2], data[3]},
+		EncryptedPayload: data[4:],
 	}, nil
 }
 
 func (r *Request) ToBytes() ([]byte, error) {
-	buffer := bytes.Buffer{}
-
-	destErr := buffer.WriteByte(r.Destination)
-	if destErr != nil {
-		return nil, destErr
-	}
-
-	srcErr := buffer.WriteByte(r.Source)
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	_, macErr := buffer.Write(r.MAC[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	_, payloadErr := buffer.Write(r.EncryptedPayload)
-	if payloadErr != nil {
-		return nil, payloadErr
-	}
-
-	return buffer.Bytes(), nil
+	return append([]byte{r.Destination, r.Source, r.MAC[0], r.MAC[1]}, r.EncryptedPayload...), nil
 }
 
 func (r *Request) VerifyMAC(sharedSecret []byte) bool {
-	src := make([]byte, cipherMACSize+len(r.EncryptedPayload))
-	copy(src[:cipherMACSize], r.MAC[:])
-	copy(src[cipherMACSize:], r.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result != nil
+	return r.Decrypt(sharedSecret) != nil
 }
 
+// Decrypt returns the plaintext, or nil if the MAC does not verify.
 func (r *Request) Decrypt(sharedSecret []byte) []byte {
-	src := make([]byte, cipherMACSize+len(r.EncryptedPayload))
-	copy(src[:cipherMACSize], r.MAC[:])
-	copy(src[cipherMACSize:], r.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result
+	return macDecrypt(sharedSecret, r.MAC, r.EncryptedPayload)
 }

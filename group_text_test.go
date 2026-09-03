@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -340,7 +341,33 @@ func TestGroupTextPayload_DecryptWrongKey(t *testing.T) {
 	}
 
 	_, err = grp.DecryptStruct(wrongPSK[:])
-	if err == nil {
-		t.Fatal("expected error decrypting with wrong key")
+	if !errors.Is(err, ErrBadMAC) {
+		t.Fatalf("DecryptStruct error = %v, want ErrBadMAC", err)
+	}
+}
+
+func TestGroupTextPayload_EncryptClampsToMaxTextLen(t *testing.T) {
+	ch := NewChannelFromHashtag("clamp")
+	sender := "Alice"
+	prefix := sender + ": "
+	text := strings.Repeat("x", MaxTextLen-len(prefix)-1) + "🙂" + "tail"
+	grp, err := (&GroupTextPayload{Timestamp: 1, Sender: sender, Text: text}).Encrypt(ch.Hash, ch.PSK[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := grp.Decrypt(ch.PSK[:])
+	body := strings.TrimRight(string(plain[5:]), "\x00")
+	if len(body) != MaxTextLen-1 || !strings.HasPrefix(body, prefix) || strings.Contains(body, "tail") {
+		t.Fatalf("body len %d = %q", len(body), body)
+	}
+	got, err := grp.DecryptStruct(ch.PSK[:])
+	if err != nil || got.Sender != sender || got.Text != strings.Repeat("x", MaxTextLen-len(prefix)-1) {
+		t.Fatalf("DecryptStruct = %+v err %v", got, err)
+	}
+	full := strings.Repeat("y", MaxTextLen-len(prefix))
+	grp, _ = (&GroupTextPayload{Timestamp: 1, Sender: sender, Text: full}).Encrypt(ch.Hash, ch.PSK[:])
+	got, _ = grp.DecryptStruct(ch.PSK[:])
+	if got.Text != full {
+		t.Fatalf("exact-length text was clamped: %d bytes", len(got.Text))
 	}
 }

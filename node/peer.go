@@ -13,14 +13,15 @@ const DefaultMaxPeers = 100
 // Peer holds information about a known mesh network peer, populated from
 // received Advert packets. Mirrors MeshCore's ContactInfo.
 type Peer struct {
-	Identity            meshcore.Identity
-	Name                string
-	Type                string // "CHAT", "REPEATER", "ROOM", "SENSOR", "NONE"
-	Lat                 int32
-	Lon                 int32
-	Feat1               uint16
-	Feat2               uint16
-	OutPath             []byte // Stored path hashes for direct routing.
+	Identity meshcore.Identity
+	Name     string
+	Type     string // "CHAT", "REPEATER", "ROOM", "SENSOR", "NONE"
+	Lat      int32
+	Lon      int32
+	Feat1    uint16
+	Feat2    uint16
+	// OutPath is the route to this peer in send order: the reverse of the path on a received advert.
+	OutPath             []byte
 	OutPathHashSize     uint8  // Bytes per hop hash (1, 2, or 4). 0 means default (1).
 	LastAdvertTimestamp uint32 // Timestamp from the peer's clock (replay protection).
 	LastSeen            time.Time
@@ -57,6 +58,11 @@ func NewPeerTable(maxPeers int) *PeerTable {
 // stored timestamp for that peer (replay protection). The caller must verify
 // the advert signature before calling Update.
 func (pt *PeerTable) Update(adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) bool {
+	return pt.UpdateWithHashSize(adv, snr, rssi, hasSignalInfo, pathHashes, 1)
+}
+
+// UpdateWithHashSize is Update for hashSize-byte hop hashes.
+func (pt *PeerTable) UpdateWithHashSize(adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte, hashSize uint8) bool {
 	key := adv.PublicKey.PublicKey()
 
 	pt.mu.Lock()
@@ -66,7 +72,7 @@ func (pt *PeerTable) Update(adv *meshcore.Advert, snr float32, rssi int8, hasSig
 		if adv.Timestamp <= existing.LastAdvertTimestamp {
 			return false
 		}
-		pt.fillPeer(existing, adv, snr, rssi, hasSignalInfo, pathHashes)
+		pt.fillPeer(existing, adv, snr, rssi, hasSignalInfo, pathHashes, hashSize)
 		return true
 	}
 
@@ -75,7 +81,7 @@ func (pt *PeerTable) Update(adv *meshcore.Advert, snr float32, rssi int8, hasSig
 	}
 
 	p := &Peer{Identity: adv.PublicKey}
-	pt.fillPeer(p, adv, snr, rssi, hasSignalInfo, pathHashes)
+	pt.fillPeer(p, adv, snr, rssi, hasSignalInfo, pathHashes, hashSize)
 	pt.peers[key] = p
 	return true
 }
@@ -103,7 +109,7 @@ func (pt *PeerTable) Insert(p *Peer) {
 	pt.peers[key] = &cp
 }
 
-func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte) {
+func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi int8, hasSignalInfo bool, pathHashes []byte, hashSize uint8) {
 	appData := adv.AppData()
 	p.Name = appData.Name
 	p.Type = appData.Type
@@ -117,10 +123,21 @@ func (pt *PeerTable) fillPeer(p *Peer, adv *meshcore.Advert, snr float32, rssi i
 	p.RSSI = rssi
 	p.HasSignalInfo = hasSignalInfo
 	if !pt.learnedPathsOnly && len(pathHashes) > 0 {
-		out := make([]byte, len(pathHashes))
-		copy(out, pathHashes)
-		p.OutPath = out
+		if hashSize == 0 {
+			hashSize = 1
+		}
+		p.OutPath = ReverseHops(pathHashes, int(hashSize))
+		p.OutPathHashSize = hashSize
 	}
+}
+
+// ReverseHops returns path with its hashSize-byte hops reversed, dropping any trailing partial hop.
+func ReverseHops(path []byte, hashSize int) []byte {
+	out := make([]byte, 0, len(path))
+	for i := len(path) - len(path)%hashSize - hashSize; i >= 0; i -= hashSize {
+		out = append(out, path[i:i+hashSize]...)
+	}
+	return out
 }
 
 // evictOldestLocked removes the peer with the oldest LastSeen time.
@@ -197,7 +214,7 @@ func (pt *PeerTable) Peers() []Peer {
 	return result
 }
 
-// SetOutPath sets the outbound path for a peer. Returns false if peer not found.
+// SetOutPath sets the outbound path for a peer in send order. Returns false if peer not found.
 // A nil path clears the path (unknown). A non-nil zero-length slice marks the
 // peer as a direct neighbor (0 hops, no routing needed).
 // hashSize is the bytes-per-hop (1, 2, or 4); pass 0 to leave unchanged.

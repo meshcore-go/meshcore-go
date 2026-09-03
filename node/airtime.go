@@ -54,9 +54,9 @@ func (b *airtimeBudget) refill(now time.Time) {
 	dc := b.dutyCycle()
 	refill := elapsed * dc
 	b.txBudgetMs += refill
-	max := b.maxBudgetMs()
-	if b.txBudgetMs > max {
-		b.txBudgetMs = max
+	limit := b.maxBudgetMs()
+	if b.txBudgetMs > limit {
+		b.txBudgetMs = limit
 	}
 	b.lastUpdate = now
 }

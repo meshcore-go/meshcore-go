@@ -291,7 +291,7 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 			i++
 		}
 		if i >= len(stream) {
-			break
+			return frames, stream[i-1:], errs
 		}
 
 		// Find the closing FEND
@@ -317,5 +317,5 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 		}
 	}
 
-	return frames, nil, errs
+	return frames, stream[len(stream)-1:], errs
 }

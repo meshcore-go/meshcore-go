@@ -124,19 +124,31 @@ func TestCommandsToBytes(t *testing.T) {
 						0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
 						0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 					},
-					Name: "Alice",
+					Type:         1,
+					Flags:        0x01,
+					OutPathLen:   0x42,
+					OutPath:      []byte{0xa1, 0xa2, 0xb1, 0xb2},
+					Name:         "Alice",
+					LastAdvert:   0x11223344,
+					Latitude:     -1,
+					Longitude:    2,
+					LastModified: 0x55667788,
 				}.ToBytes()
 			},
 			wantHex: "09" +
 				"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" +
-				"416c696365" + strings.Repeat("00", 27),
+				"01" + "01" + "42" +
+				"a1a2b1b2" + strings.Repeat("00", 60) +
+				"416c696365" + strings.Repeat("00", 27) +
+				"44332211" + "ffffffff" + "02000000" + "88776655",
 		},
 		{
 			name: "add update contact long name truncated",
 			build: func() []byte {
-				return AddUpdateContactCommand{Name: strings.Repeat("A", 40)}.ToBytes()
+				return AddUpdateContactCommand{OutPathLen: OutPathUnknown, Name: strings.Repeat("A", 40)}.ToBytes()
 			},
-			wantHex: "09" + strings.Repeat("00", 32) + strings.Repeat("41", 31) + "00",
+			wantHex: "09" + strings.Repeat("00", 32) + "0000ff" + strings.Repeat("00", 64) +
+				strings.Repeat("41", 31) + "00" + strings.Repeat("00", 16),
 		},
 		{
 			name: "remove contact",
@@ -190,6 +202,20 @@ func TestCommandsToBytes(t *testing.T) {
 				return SendSelfAdvertCommand{AdvertType: 1}.ToBytes()
 			},
 			wantHex: "0701",
+		},
+		{
+			name: "send self advert flood",
+			build: func() []byte {
+				return SendSelfAdvertCommand{Flood: true}.ToBytes()
+			},
+			wantHex: "0701",
+		},
+		{
+			name: "send self advert zero hop",
+			build: func() []byte {
+				return SendSelfAdvertCommand{}.ToBytes()
+			},
+			wantHex: "0700",
 		},
 		{
 			name: "set advert name",
@@ -560,6 +586,20 @@ func TestCommandsToBytes(t *testing.T) {
 				return SendChannelDataCommand{ChannelIdx: 1, DataType: 0x00ff, Payload: []byte{0x01, 0x02}}.ToBytes()
 			},
 			wantHex: "3e0100ff000102",
+		},
+		{
+			name: "send channel data flood",
+			build: func() []byte {
+				return SendChannelDataCommand{ChannelIdx: 1, Flood: true, Path: []byte{0xaa}, DataType: 0x00ff, Payload: []byte{0x01}}.ToBytes()
+			},
+			wantHex: "3e01ffff0001",
+		},
+		{
+			name: "send channel data 2-byte hashes",
+			build: func() []byte {
+				return SendChannelDataCommand{ChannelIdx: 1, PathLen: 0x42, Path: []byte{0xa1, 0xa2, 0xb1, 0xb2}, DataType: 0x0001, Payload: []byte{0x01}}.ToBytes()
+			},
+			wantHex: "3e0142a1a2b1b2010001",
 		},
 		{
 			name: "set tuning params",

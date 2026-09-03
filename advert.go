@@ -5,7 +5,22 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"fmt"
+	"unicode/utf8"
 )
+
+// TruncateUTF8 returns the longest prefix of s within n bytes that ends on a rune boundary.
+func TruncateUTF8(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 type AdvertAppData struct {
 	Type  string
@@ -14,6 +29,9 @@ type AdvertAppData struct {
 	Lon   int32  // Little Endian
 	Feat1 uint16 // Little Endian
 	Feat2 uint16 // Little Endian
+
+	// HasLocation forces the LATLON flag on encode even when Lat and Lon are both 0.
+	HasLocation bool
 }
 
 func (a *AdvertAppData) ToBytes() ([]byte, error) {
@@ -35,7 +53,7 @@ func (a *AdvertAppData) ToBytes() ([]byte, error) {
 	}
 
 	flags := typeByte
-	if a.Lat != 0 || a.Lon != 0 {
+	if a.HasLocation || a.Lat != 0 || a.Lon != 0 {
 		flags |= AdvertLatLonMask
 	}
 	if a.Feat1 != 0 {
@@ -43,9 +61,6 @@ func (a *AdvertAppData) ToBytes() ([]byte, error) {
 	}
 	if a.Feat2 != 0 {
 		flags |= AdvertFeat2Mask
-	}
-	if a.Name != "" {
-		flags |= AdvertNameMask
 	}
 
 	buffer := bytes.NewBuffer(nil)
@@ -75,10 +90,9 @@ func (a *AdvertAppData) ToBytes() ([]byte, error) {
 		}
 	}
 
-	if flags&AdvertNameMask > 0 {
-		if _, err := buffer.Write([]byte(a.Name)); err != nil {
-			return nil, fmt.Errorf("writing name: %w", err)
-		}
+	if name := TruncateUTF8(a.Name, MaxAdvertDataSize-buffer.Len()); name != "" {
+		buffer.Bytes()[0] |= AdvertNameMask
+		buffer.WriteString(name)
 	}
 
 	return buffer.Bytes(), nil
@@ -110,6 +124,7 @@ func AdvertAppDataFromBytes(data []byte) (*AdvertAppData, error) {
 
 	// Parse lat lon
 	if flags&AdvertLatLonMask > 0 {
+		advertAppData.HasLocation = true
 		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Lat); err != nil {
 			return nil, fmt.Errorf("reading lat: %w", err)
 		}

@@ -23,97 +23,97 @@ const (
 
 // Command codes.
 const (
-	CmdAppStart             = 1
-	CmdSendTxtMsg           = 2
-	CmdSendChannelTxtMsg    = 3
-	CmdGetContacts          = 4
-	CmdGetDeviceTime        = 5
-	CmdSetDeviceTime        = 6
-	CmdSendSelfAdvert       = 7
-	CmdSetAdvertName        = 8
-	CmdAddUpdateContact     = 9
-	CmdSyncNextMessage      = 10
-	CmdSetRadioParams       = 11
-	CmdSetRadioTxPower      = 12
-	CmdResetPath            = 13
-	CmdSetAdvertLatLon      = 14
-	CmdRemoveContact        = 15
-	CmdShareContact         = 16
-	CmdExportContact        = 17
-	CmdImportContact        = 18
-	CmdReboot               = 19
-	CmdGetBattAndStorage    = 20
-	CmdSetTuningParams      = 21
-	CmdDeviceQuery          = 22
-	CmdExportPrivateKey     = 23
-	CmdImportPrivateKey     = 24
-	CmdSendRawData          = 25
-	CmdSendLogin            = 26
-	CmdSendStatusReq        = 27
-	CmdHasConnection        = 28
-	CmdLogout               = 29
-	CmdGetContactByKey      = 30
-	CmdGetChannel           = 31
-	CmdSetChannel           = 32
-	CmdSignStart            = 33
-	CmdSignData             = 34
-	CmdSignFinish           = 35
-	CmdSendTracePath        = 36
-	CmdSetDevicePin         = 37
-	CmdSetOtherParams       = 38
-	CmdSendTelemetryReq     = 39
-	CmdGetCustomVars        = 40
-	CmdSetCustomVar         = 41
-	CmdGetAdvertPath        = 42
-	CmdGetTuningParams      = 43
-	CmdSendBinaryReq        = 50
-	CmdFactoryReset         = 51
-	CmdSendPathDiscoveryReq = 52
-	CmdSetFloodScopeKey     = 54
-	CmdSendControlData      = 55
-	CmdGetStats             = 56
-	CmdSendAnonReq          = 57
-	CmdSetAutoAddConfig     = 58
-	CmdGetAutoAddConfig     = 59
-	CmdGetAllowedRepeatFreq = 60
-	CmdSetPathHashMode      = 61
-	CmdSendChannelData      = 62
-	CmdSetDefaultFloodScope = 63
-	CmdGetDefaultFloodScope = 64
-	CmdSendRawPacket        = 65
+	CmdAppStart             byte = 1
+	CmdSendTxtMsg           byte = 2
+	CmdSendChannelTxtMsg    byte = 3
+	CmdGetContacts          byte = 4
+	CmdGetDeviceTime        byte = 5
+	CmdSetDeviceTime        byte = 6
+	CmdSendSelfAdvert       byte = 7
+	CmdSetAdvertName        byte = 8
+	CmdAddUpdateContact     byte = 9
+	CmdSyncNextMessage      byte = 10
+	CmdSetRadioParams       byte = 11
+	CmdSetRadioTxPower      byte = 12
+	CmdResetPath            byte = 13
+	CmdSetAdvertLatLon      byte = 14
+	CmdRemoveContact        byte = 15
+	CmdShareContact         byte = 16
+	CmdExportContact        byte = 17
+	CmdImportContact        byte = 18
+	CmdReboot               byte = 19
+	CmdGetBattAndStorage    byte = 20
+	CmdSetTuningParams      byte = 21
+	CmdDeviceQuery          byte = 22
+	CmdExportPrivateKey     byte = 23
+	CmdImportPrivateKey     byte = 24
+	CmdSendRawData          byte = 25
+	CmdSendLogin            byte = 26
+	CmdSendStatusReq        byte = 27
+	CmdHasConnection        byte = 28
+	CmdLogout               byte = 29
+	CmdGetContactByKey      byte = 30
+	CmdGetChannel           byte = 31
+	CmdSetChannel           byte = 32
+	CmdSignStart            byte = 33
+	CmdSignData             byte = 34
+	CmdSignFinish           byte = 35
+	CmdSendTracePath        byte = 36
+	CmdSetDevicePin         byte = 37
+	CmdSetOtherParams       byte = 38
+	CmdSendTelemetryReq     byte = 39
+	CmdGetCustomVars        byte = 40
+	CmdSetCustomVar         byte = 41
+	CmdGetAdvertPath        byte = 42
+	CmdGetTuningParams      byte = 43
+	CmdSendBinaryReq        byte = 50
+	CmdFactoryReset         byte = 51
+	CmdSendPathDiscoveryReq byte = 52
+	CmdSetFloodScopeKey     byte = 54
+	CmdSendControlData      byte = 55
+	CmdGetStats             byte = 56
+	CmdSendAnonReq          byte = 57
+	CmdSetAutoAddConfig     byte = 58
+	CmdGetAutoAddConfig     byte = 59
+	CmdGetAllowedRepeatFreq byte = 60
+	CmdSetPathHashMode      byte = 61
+	CmdSendChannelData      byte = 62
+	CmdSetDefaultFloodScope byte = 63
+	CmdGetDefaultFloodScope byte = 64
+	CmdSendRawPacket        byte = 65
 )
 
 // Response codes.
 const (
-	RespOk                = 0
-	RespErr               = 1
-	RespContactsStart     = 2
-	RespContact           = 3
-	RespEndOfContacts     = 4
-	RespSelfInfo          = 5
-	RespSent              = 6
-	RespContactMsgRecv    = 7
-	RespChannelMsgRecv    = 8
-	RespCurrTime          = 9
-	RespNoMoreMessages    = 10
-	RespExportContact     = 11
-	RespBattAndStorage    = 12
-	RespDeviceInfo        = 13
-	RespPrivateKey        = 14
-	RespDisabled          = 15
-	RespContactMsgRecvV3  = 16
-	RespChannelMsgRecvV3  = 17
-	RespChannelInfo       = 18
-	RespSignStart         = 19
-	RespSignature         = 20
-	RespCustomVars        = 21
-	RespAdvertPath        = 22
-	RespTuningParams      = 23
-	RespStats             = 24
-	RespAutoAddConfig     = 25
-	RespAllowedRepeatFreq = 26
-	RespChannelDataRecv   = 27
-	RespDefaultFloodScope = 28
+	RespOk                byte = 0
+	RespErr               byte = 1
+	RespContactsStart     byte = 2
+	RespContact           byte = 3
+	RespEndOfContacts     byte = 4
+	RespSelfInfo          byte = 5
+	RespSent              byte = 6
+	RespContactMsgRecv    byte = 7
+	RespChannelMsgRecv    byte = 8
+	RespCurrTime          byte = 9
+	RespNoMoreMessages    byte = 10
+	RespExportContact     byte = 11
+	RespBattAndStorage    byte = 12
+	RespDeviceInfo        byte = 13
+	RespPrivateKey        byte = 14
+	RespDisabled          byte = 15
+	RespContactMsgRecvV3  byte = 16
+	RespChannelMsgRecvV3  byte = 17
+	RespChannelInfo       byte = 18
+	RespSignStart         byte = 19
+	RespSignature         byte = 20
+	RespCustomVars        byte = 21
+	RespAdvertPath        byte = 22
+	RespTuningParams      byte = 23
+	RespStats             byte = 24
+	RespAutoAddConfig     byte = 25
+	RespAllowedRepeatFreq byte = 26
+	RespChannelDataRecv   byte = 27
+	RespDefaultFloodScope byte = 28
 )
 
 // Push codes (asynchronous firmware notifications, codes >= 0x80).
@@ -138,9 +138,9 @@ const (
 )
 
 const (
-	StatsTypeCore    = 0
-	StatsTypeRadio   = 1
-	StatsTypePackets = 2
+	StatsTypeCore    byte = 0
+	StatsTypeRadio   byte = 1
+	StatsTypePackets byte = 2
 )
 
 const (
@@ -151,14 +151,34 @@ const (
 	AutoAddSensor          = 0x10
 )
 
-// Error codes (used in RespErr responses).
+// Error codes carried in RespErr responses (firmware ERR_CODE_*).
 const (
-	ErrUnsupportedCmd = 1
-	ErrNotFound       = 2
-	ErrTableFull      = 3
-	ErrBadState       = 4
-	ErrFileIoError    = 5
-	ErrIllegalArg     = 6
+	ErrCodeUnsupportedCmd byte = 1
+	ErrCodeNotFound       byte = 2
+	ErrCodeTableFull      byte = 3
+	ErrCodeBadState       byte = 4
+	ErrCodeFileIoError    byte = 5
+	ErrCodeIllegalArg     byte = 6
+)
+
+// Deprecated: use the ErrCode* names.
+const (
+	ErrUnsupportedCmd = ErrCodeUnsupportedCmd
+	ErrNotFound       = ErrCodeNotFound
+	ErrTableFull      = ErrCodeTableFull
+	ErrBadState       = ErrCodeBadState
+	ErrFileIoError    = ErrCodeFileIoError
+	ErrIllegalArg     = ErrCodeIllegalArg
+)
+
+// OutPathUnknown is the firmware's OUT_PATH_UNKNOWN path_len.
+const OutPathUnknown byte = 0xFF
+
+// Text message types (firmware TXT_TYPE_*).
+const (
+	TxtTypePlain       byte = 0
+	TxtTypeCLIData     byte = 1 // CLI command / reply
+	TxtTypeSignedPlain byte = 2 // text preceded by a 4-byte sender pubkey prefix
 )
 
 // Frame size limits.

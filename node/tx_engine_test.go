@@ -275,7 +275,7 @@ func TestTxEngine_Stats_Sent(t *testing.T) {
 		return nil
 	}, done)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		e.enqueue([]byte{byte(i)}, PrioritySend, 0)
 	}
 	time.Sleep(200 * time.Millisecond)

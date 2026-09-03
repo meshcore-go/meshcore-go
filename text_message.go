@@ -1,8 +1,8 @@
 package meshcore
 
 import (
-	"bytes"
 	"encoding/binary"
+	"fmt"
 	"time"
 )
 
@@ -14,81 +14,28 @@ type TextMessage struct {
 }
 
 func TextMessageFromBytes(data []byte) (*TextMessage, error) {
-	buffer := bytes.NewBuffer(data)
-
-	// Read Dest
-	dest, destErr := buffer.ReadByte()
-	if destErr != nil {
-		return nil, destErr
+	if len(data) < 4 {
+		return nil, fmt.Errorf("%w: text message needs 4 header bytes, have %d", ErrTooShort, len(data))
 	}
-
-	// Read Source
-	src, srcErr := buffer.ReadByte()
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	// Read Encryption MAC
-	var mac [2]byte
-	_, macErr := buffer.Read(mac[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	cihperBytes := buffer.Bytes()
-
 	return &TextMessage{
-		Destination:      dest,
-		Source:           src,
-		MAC:              mac,
-		EncryptedPayload: cihperBytes,
+		Destination:      data[0],
+		Source:           data[1],
+		MAC:              [2]byte{data[2], data[3]},
+		EncryptedPayload: data[4:],
 	}, nil
 }
 
 func (t *TextMessage) ToBytes() ([]byte, error) {
-	buffer := bytes.Buffer{}
-
-	destErr := buffer.WriteByte(t.Destination)
-	if destErr != nil {
-		return nil, destErr
-	}
-
-	srcErr := buffer.WriteByte(t.Source)
-	if srcErr != nil {
-		return nil, srcErr
-	}
-
-	_, macErr := buffer.Write(t.MAC[:])
-	if macErr != nil {
-		return nil, macErr
-	}
-
-	_, payloadErr := buffer.Write(t.EncryptedPayload)
-	if payloadErr != nil {
-		return nil, payloadErr
-	}
-
-	return buffer.Bytes(), nil
+	return append([]byte{t.Destination, t.Source, t.MAC[0], t.MAC[1]}, t.EncryptedPayload...), nil
 }
 
 func (t *TextMessage) VerifyMAC(sharedSecret []byte) bool {
-	// Reconstruct the wire format: [MAC][EncryptedPayload]
-	src := make([]byte, cipherMACSize+len(t.EncryptedPayload))
-	copy(src[:cipherMACSize], t.MAC[:])
-	copy(src[cipherMACSize:], t.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result != nil
+	return t.Decrypt(sharedSecret) != nil
 }
 
+// Decrypt returns the plaintext, or nil if the MAC does not verify.
 func (t *TextMessage) Decrypt(sharedSecret []byte) []byte {
-	// Reconstruct the wire format: [MAC][EncryptedPayload]
-	src := make([]byte, cipherMACSize+len(t.EncryptedPayload))
-	copy(src[:cipherMACSize], t.MAC[:])
-	copy(src[cipherMACSize:], t.EncryptedPayload)
-
-	result, _ := MACThenDecrypt(sharedSecret, src)
-	return result
+	return macDecrypt(sharedSecret, t.MAC, t.EncryptedPayload)
 }
 
 func BuildTextPlaintext(timestamp time.Time, flags byte, text []byte) []byte {

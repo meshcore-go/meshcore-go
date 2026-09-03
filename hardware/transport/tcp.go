@@ -6,10 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
 	"time"
-
-	"github.com/meshcore-go/meshcore-go/hardware"
 )
 
 // DefaultTCPKeepAlivePeriod is the default keepalive idle/probe interval
@@ -45,40 +42,43 @@ type TCPConfig struct {
 }
 
 type TCPTransport struct {
+	base
 	config TCPConfig
-	conn   net.Conn
 
-	hMu     sync.RWMutex
-	onFrame FrameHandler
-	onError ErrorHandler
-
-	writeMu      sync.Mutex
+	// 0 means disabled
+	keepAlive    time.Duration
+	idle         time.Duration
 	writeTimeout time.Duration
-
-	done      chan struct{}
-	dead      chan struct{}
-	closeOnce sync.Once
 }
+
+var _ Transport = (*TCPTransport)(nil)
 
 func NewTCPTransport(config TCPConfig) *TCPTransport {
 	return &TCPTransport{
-		config: config,
-		done:   make(chan struct{}),
-		dead:   make(chan struct{}),
+		base:         newBase(),
+		config:       config,
+		keepAlive:    resolve(config.KeepAlivePeriod, DefaultTCPKeepAlivePeriod),
+		idle:         resolve(config.ReadIdleTimeout, DefaultTCPReadIdleTimeout),
+		writeTimeout: resolve(config.WriteTimeout, DefaultTCPWriteTimeout),
 	}
 }
 
-func (t *TCPTransport) Connect(ctx context.Context) error {
-	keepAlive := t.config.KeepAlivePeriod
-	if keepAlive == 0 {
-		keepAlive = DefaultTCPKeepAlivePeriod
+func resolve(v, def time.Duration) time.Duration {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	default:
+		return v
 	}
+}
 
-	dialer := &net.Dialer{}
-	if keepAlive > 0 {
-		dialer.KeepAlive = keepAlive
-	} else {
-		dialer.KeepAlive = -1
+// Connect dials the modem and starts reading.
+func (t *TCPTransport) Connect(ctx context.Context) error {
+	dialer := &net.Dialer{KeepAlive: -1}
+	if t.keepAlive > 0 {
+		dialer.KeepAlive = t.keepAlive
 	}
 
 	conn, err := dialer.DialContext(ctx, "tcp", t.config.Address)
@@ -86,95 +86,43 @@ func (t *TCPTransport) Connect(ctx context.Context) error {
 		return fmt.Errorf("dial tcp: %w", err)
 	}
 
-	if tcpConn, ok := conn.(*net.TCPConn); ok && keepAlive > 0 {
+	if tcpConn, ok := conn.(*net.TCPConn); ok && t.keepAlive > 0 {
 		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(keepAlive)
-	}
-
-	t.conn = conn
-
-	writeTimeout := t.config.WriteTimeout
-	if writeTimeout == 0 {
-		writeTimeout = DefaultTCPWriteTimeout
-	}
-	if writeTimeout < 0 {
-		writeTimeout = 0
-	}
-	t.writeTimeout = writeTimeout
-
-	idle := t.config.ReadIdleTimeout
-	if idle == 0 {
-		idle = DefaultTCPReadIdleTimeout
+		_ = tcpConn.SetKeepAlivePeriod(t.keepAlive)
 	}
 
 	cfg := readLoopConfig{
 		getFrameHandler: t.frameHandler,
-		getErrorHandler: t.makeErrorGetter(idle),
+		getErrorHandler: t.makeErrorGetter(t.idle),
 	}
-	if idle > 0 {
+	if t.idle > 0 {
 		cfg.beforeRead = func() error {
-			return t.conn.SetReadDeadline(time.Now().Add(idle))
+			return conn.SetReadDeadline(time.Now().Add(t.idle))
 		}
 	}
 
-	go readLoop(t.conn, t.done, t.dead, cfg)
-
+	t.start(conn, cfg)
 	return nil
 }
 
-func (t *TCPTransport) Close() error {
-	var closeErr error
-
-	t.closeOnce.Do(func() {
-		close(t.done)
-		if t.conn != nil {
-			closeErr = t.conn.Close()
-		}
-	})
-
-	return closeErr
-}
-
 func (t *TCPTransport) Send(data []byte) error {
-	if t.conn == nil {
-		return fmt.Errorf("tcp transport not connected")
+	w, err := t.writer()
+	if err != nil {
+		return err
 	}
+	conn := w.(net.Conn)
 
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
 	if t.writeTimeout > 0 {
-		if err := t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout)); err != nil {
+		if err := conn.SetWriteDeadline(time.Now().Add(t.writeTimeout)); err != nil {
 			return fmt.Errorf("set write deadline: %w", err)
 		}
-		defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
+		defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 	}
 
-	return writeRaw(t.conn, data)
-}
-
-func (t *TCPTransport) SetFrameHandler(h func(*hardware.KissFrame)) {
-	t.hMu.Lock()
-	t.onFrame = h
-	t.hMu.Unlock()
-}
-
-func (t *TCPTransport) SetErrorHandler(h func(error)) {
-	t.hMu.Lock()
-	t.onError = h
-	t.hMu.Unlock()
-}
-
-func (t *TCPTransport) frameHandler() FrameHandler {
-	t.hMu.RLock()
-	defer t.hMu.RUnlock()
-	return t.onFrame
-}
-
-func (t *TCPTransport) errorHandler() ErrorHandler {
-	t.hMu.RLock()
-	defer t.hMu.RUnlock()
-	return t.onError
+	return writeRaw(conn, data)
 }
 
 // makeErrorGetter returns an error-handler getter that wraps idle-timeout
@@ -191,19 +139,11 @@ func (t *TCPTransport) makeErrorGetter(idle time.Duration) func() ErrorHandler {
 		}
 		return func(err error) {
 			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				h(fmt.Errorf("tcp read idle timeout (%s): %w", idle, err))
-				return
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
+			if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, os.ErrDeadlineExceeded) {
 				h(fmt.Errorf("tcp read idle timeout (%s): %w", idle, err))
 				return
 			}
 			h(err)
 		}
 	}
-}
-
-func (t *TCPTransport) Dead() <-chan struct{} {
-	return t.dead
 }

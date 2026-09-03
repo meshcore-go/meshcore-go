@@ -23,10 +23,12 @@ type PushHandler func(companion.Response)
 type Client struct {
 	transport Transport
 
+	cmdMu sync.Mutex
+
 	mu      sync.Mutex
 	waiter  *responseWaiter
 	pushMu  sync.RWMutex
-	pushMap map[byte][]PushHandler
+	pushMap map[byte][]*pushEntry
 	errMu   sync.RWMutex
 	errH    func(error)
 }
@@ -34,7 +36,7 @@ type Client struct {
 func New(t Transport) *Client {
 	c := &Client{
 		transport: t,
-		pushMap:   make(map[byte][]PushHandler),
+		pushMap:   make(map[byte][]*pushEntry),
 	}
 	t.SetResponseHandler(c.onResponse)
 	t.SetErrorHandler(c.onError)
@@ -55,11 +57,30 @@ func (c *Client) SetErrorHandler(h func(error)) {
 	c.errMu.Unlock()
 }
 
-func (c *Client) OnPush(code byte, h PushHandler) {
+// OnPush registers a handler for a push code; the returned func removes it.
+func (c *Client) OnPush(code byte, h PushHandler) (unsubscribe func()) {
+	entry := &pushEntry{h: h}
 	c.pushMu.Lock()
-	c.pushMap[code] = append(c.pushMap[code], h)
+	c.pushMap[code] = append(c.pushMap[code], entry)
 	c.pushMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.pushMu.Lock()
+			defer c.pushMu.Unlock()
+			hs := c.pushMap[code]
+			for i, e := range hs {
+				if e == entry {
+					c.pushMap[code] = append(hs[:i:i], hs[i+1:]...)
+					return
+				}
+			}
+		})
+	}
 }
+
+type pushEntry struct{ h PushHandler }
 
 func (c *Client) onError(err error) {
 	c.errMu.RLock()
@@ -87,8 +108,8 @@ func (c *Client) onResponse(resp companion.Response) {
 	handlers := c.pushMap[resp.Code]
 	c.pushMu.RUnlock()
 
-	for _, h := range handlers {
-		h(resp)
+	for _, e := range handlers {
+		e.h(resp)
 	}
 }
 
@@ -114,6 +135,9 @@ func (w *responseWaiter) accepts(code byte) bool {
 }
 
 func (c *Client) sendAndWait(ctx context.Context, cmd []byte, codes ...byte) (companion.Response, error) {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
 	w := newWaiter(1, codes...)
 
 	c.mu.Lock()
@@ -144,6 +168,9 @@ func (c *Client) sendAndWait(ctx context.Context, cmd []byte, codes ...byte) (co
 }
 
 func (c *Client) sendAndCollect(ctx context.Context, cmd []byte, terminators []byte, codes ...byte) ([]companion.Response, error) {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
 	allCodes := make([]byte, 0, len(codes)+len(terminators)+1)
 	allCodes = append(allCodes, codes...)
 	allCodes = append(allCodes, terminators...)
@@ -202,7 +229,7 @@ func (c *Client) DeviceQuery(ctx context.Context) (companion.DeviceInfoResponse,
 	if err != nil {
 		return companion.DeviceInfoResponse{}, err
 	}
-	return resp.Data.(companion.DeviceInfoResponse), nil
+	return as[companion.DeviceInfoResponse](resp)
 }
 
 // AppStart sends AppStart and waits for the SelfInfo response.
@@ -214,7 +241,7 @@ func (c *Client) AppStart(ctx context.Context, appVersion byte, appName string) 
 	if err != nil {
 		return companion.SelfInfoResponse{}, err
 	}
-	return resp.Data.(companion.SelfInfoResponse), nil
+	return as[companion.SelfInfoResponse](resp)
 }
 
 // SetDeviceTime sets the device clock and waits for Ok.
@@ -240,13 +267,13 @@ func (c *Client) GetDeviceTime(ctx context.Context) (companion.CurrTimeResponse,
 	if err != nil {
 		return companion.CurrTimeResponse{}, err
 	}
-	return resp.Data.(companion.CurrTimeResponse), nil
+	return as[companion.CurrTimeResponse](resp)
 }
 
-// SendSelfAdvert broadcasts a self-advertisement and waits for Ok.
-func (c *Client) SendSelfAdvert(ctx context.Context, advertType byte) error {
+// SendSelfAdvert advertises the device and waits for Ok.
+func (c *Client) SendSelfAdvert(ctx context.Context, flood byte) error {
 	_, err := c.sendAndWait(ctx,
-		companion.SendSelfAdvertCommand{AdvertType: advertType}.ToBytes(),
+		companion.SendSelfAdvertCommand{AdvertType: flood}.ToBytes(),
 		companion.RespOk, companion.RespErr,
 	)
 	return err
@@ -281,18 +308,23 @@ func (c *Client) GetContactsSince(ctx context.Context, since uint32, hasSince bo
 
 // WaitingMessage represents a message retrieved from the device's queue.
 type WaitingMessage struct {
-	IsChannel bool
-	Contact   *companion.ContactMsgRecvResponse
-	Channel   *companion.ChannelMsgRecvResponse
+	IsChannel   bool
+	Contact     *companion.ContactMsgRecvResponse
+	Channel     *companion.ChannelMsgRecvResponse
+	ChannelData *companion.ChannelDataRecvResponse
 }
 
 // GetWaitingMessages drains all waiting messages from the device.
 func (c *Client) GetWaitingMessages(ctx context.Context) ([]WaitingMessage, error) {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
 	msgCodes := []byte{
 		companion.RespContactMsgRecv,
 		companion.RespContactMsgRecvV3,
 		companion.RespChannelMsgRecv,
 		companion.RespChannelMsgRecvV3,
+		companion.RespChannelDataRecv,
 		companion.RespNoMoreMessages,
 		companion.RespErr,
 	}
@@ -327,34 +359,55 @@ func (c *Client) GetWaitingMessages(ctx context.Context) ([]WaitingMessage, erro
 				return messages, nil
 
 			case companion.RespContactMsgRecv:
-				msg := resp.Data.(companion.ContactMsgRecvResponse)
+				msg, err := as[companion.ContactMsgRecvResponse](resp)
+				if err != nil {
+					return messages, err
+				}
 				messages = append(messages, WaitingMessage{Contact: &msg})
 
 			case companion.RespContactMsgRecvV3:
-				v3 := resp.Data.(companion.ContactMsgRecvV3Response)
+				v3, err := as[companion.ContactMsgRecvV3Response](resp)
+				if err != nil {
+					return messages, err
+				}
 				normalized := companion.ContactMsgRecvResponse{
 					PubKeyPrefix:    v3.PubKeyPrefix,
 					PathLen:         v3.PathLen,
 					TxtType:         v3.TxtType,
 					SenderTimestamp: v3.SenderTimestamp,
+					SenderPrefix:    v3.SenderPrefix,
 					Text:            v3.Text,
 				}
 				messages = append(messages, WaitingMessage{Contact: &normalized})
 
 			case companion.RespChannelMsgRecv:
-				msg := resp.Data.(companion.ChannelMsgRecvResponse)
+				msg, err := as[companion.ChannelMsgRecvResponse](resp)
+				if err != nil {
+					return messages, err
+				}
 				messages = append(messages, WaitingMessage{IsChannel: true, Channel: &msg})
 
 			case companion.RespChannelMsgRecvV3:
-				v3 := resp.Data.(companion.ChannelMsgRecvV3Response)
+				v3, err := as[companion.ChannelMsgRecvV3Response](resp)
+				if err != nil {
+					return messages, err
+				}
 				normalized := companion.ChannelMsgRecvResponse{
 					ChannelIdx:      v3.ChannelIdx,
 					PathLen:         v3.PathLen,
 					TxtType:         v3.TxtType,
 					SenderTimestamp: v3.SenderTimestamp,
+					SenderPrefix:    v3.SenderPrefix,
 					Text:            v3.Text,
 				}
 				messages = append(messages, WaitingMessage{IsChannel: true, Channel: &normalized})
+
+			case companion.RespChannelDataRecv:
+				data, err := as[companion.ChannelDataRecvResponse](resp)
+				if err != nil {
+					return messages, err
+				}
+				messages = append(messages, WaitingMessage{IsChannel: true, ChannelData: &data})
 			}
 
 			if err := c.transport.Send(companion.SyncNextMessageCommand{}.ToBytes()); err != nil {
@@ -380,10 +433,10 @@ func (c *Client) SendTextMessage(ctx context.Context, peer meshcore.Identity, te
 	if err != nil {
 		return companion.SentResponse{}, err
 	}
-	return resp.Data.(companion.SentResponse), nil
+	return as[companion.SentResponse](resp)
 }
 
-// SendChannelTextMessage sends a text message to a channel and waits for the SentResponse.
+// SendChannelTextMessage sends a text message to a channel.
 func (c *Client) SendChannelTextMessage(ctx context.Context, channelIdx byte, text string, txtType byte) (companion.SentResponse, error) {
 	cmd := companion.SendChannelTxtMsgCommand{
 		TxtType:         txtType,
@@ -391,11 +444,11 @@ func (c *Client) SendChannelTextMessage(ctx context.Context, channelIdx byte, te
 		SenderTimestamp: uint32(time.Now().Unix()),
 		Text:            text,
 	}
-	resp, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespSent, companion.RespErr)
-	if err != nil {
+	resp, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespSent, companion.RespErr)
+	if err != nil || resp.Code != companion.RespSent {
 		return companion.SentResponse{}, err
 	}
-	return resp.Data.(companion.SentResponse), nil
+	return as[companion.SentResponse](resp)
 }
 
 // GetBattAndStorage returns the device's battery voltage and storage info.
@@ -407,7 +460,7 @@ func (c *Client) GetBattAndStorage(ctx context.Context) (companion.BattAndStorag
 	if err != nil {
 		return companion.BattAndStorageResponse{}, err
 	}
-	return resp.Data.(companion.BattAndStorageResponse), nil
+	return as[companion.BattAndStorageResponse](resp)
 }
 
 // SetAdvertName sets the device's advertisement name and waits for Ok.
@@ -451,7 +504,17 @@ func (c *Client) SetTxPower(ctx context.Context, power byte) error {
 
 // AddUpdateContact adds or updates a contact and waits for Ok.
 func (c *Client) AddUpdateContact(ctx context.Context, peer meshcore.Identity, name string) error {
-	cmd := companion.AddUpdateContactCommand{PublicKey: peer.PublicKey(), Name: name}
+	return c.AddUpdateContactFull(ctx, companion.AddUpdateContactCommand{
+		PublicKey:    peer.PublicKey(),
+		Type:         meshcore.AdvertTypeChat,
+		OutPathLen:   companion.OutPathUnknown,
+		Name:         name,
+		LastModified: uint32(time.Now().Unix()),
+	})
+}
+
+// AddUpdateContactFull adds or updates a contact with every field the firmware stores.
+func (c *Client) AddUpdateContactFull(ctx context.Context, cmd companion.AddUpdateContactCommand) error {
 	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
 	return err
 }
@@ -477,7 +540,7 @@ func (c *Client) ExportContact(ctx context.Context, peer meshcore.Identity) (com
 	if err != nil {
 		return companion.ExportContactResponse{}, err
 	}
-	return resp.Data.(companion.ExportContactResponse), nil
+	return as[companion.ExportContactResponse](resp)
 }
 
 // ImportContact imports a contact from advert data and waits for Ok.
@@ -501,7 +564,7 @@ func (c *Client) GetChannel(ctx context.Context, idx byte) (companion.ChannelInf
 	if err != nil {
 		return companion.ChannelInfoResponse{}, err
 	}
-	return resp.Data.(companion.ChannelInfoResponse), nil
+	return as[companion.ChannelInfoResponse](resp)
 }
 
 // SetChannel configures a channel and waits for Ok.
@@ -520,7 +583,7 @@ func (c *Client) ExportPrivateKey(ctx context.Context) (companion.PrivateKeyResp
 	if err != nil {
 		return companion.PrivateKeyResponse{}, err
 	}
-	return resp.Data.(companion.PrivateKeyResponse), nil
+	return as[companion.PrivateKeyResponse](resp)
 }
 
 // ImportPrivateKey imports a private key into the device and waits for Ok.
@@ -530,18 +593,22 @@ func (c *Client) ImportPrivateKey(ctx context.Context, key [64]byte) error {
 	return err
 }
 
-// SendLogin sends a login request to a remote node and waits for Ok.
-func (c *Client) SendLogin(ctx context.Context, peer meshcore.Identity, password string) error {
-	cmd := companion.SendLoginCommand{PublicKey: peer.PublicKey(), Password: password}
-	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+// sendExpectSent sends a command acked with SENT.
+func (c *Client) sendExpectSent(ctx context.Context, cmd []byte) error {
+	_, err := c.sendAndWait(ctx, cmd, companion.RespSent, companion.RespOk, companion.RespErr)
 	return err
 }
 
-// SendStatusReq sends a status request to a remote node and waits for Ok.
+// SendLogin sends a login request to a remote node.
+func (c *Client) SendLogin(ctx context.Context, peer meshcore.Identity, password string) error {
+	cmd := companion.SendLoginCommand{PublicKey: peer.PublicKey(), Password: password}
+	return c.sendExpectSent(ctx, cmd.ToBytes())
+}
+
+// SendStatusReq sends a status request to a remote node.
 func (c *Client) SendStatusReq(ctx context.Context, peer meshcore.Identity) error {
 	cmd := companion.SendStatusReqCommand{PublicKey: peer.PublicKey()}
-	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
-	return err
+	return c.sendExpectSent(ctx, cmd.ToBytes())
 }
 
 // HasConnection checks if a connection exists for the given public key.
@@ -565,21 +632,19 @@ func (c *Client) GetContactByKey(ctx context.Context, peer meshcore.Identity) (c
 	if err != nil {
 		return companion.ContactResponse{}, err
 	}
-	return resp.Data.(companion.ContactResponse), nil
+	return as[companion.ContactResponse](resp)
 }
 
-// SendTracePath sends a trace path request and waits for Ok.
+// SendTracePath sends a trace path request.
 func (c *Client) SendTracePath(ctx context.Context, tag, auth uint32, flags byte, path []byte) error {
 	cmd := companion.SendTracePathCommand{Tag: tag, Auth: auth, Flags: flags, Path: path}
-	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
-	return err
+	return c.sendExpectSent(ctx, cmd.ToBytes())
 }
 
-// SendTelemetryReq sends a telemetry request to a remote node and waits for Ok.
+// SendTelemetryReq sends a telemetry request to a remote node.
 func (c *Client) SendTelemetryReq(ctx context.Context, peer meshcore.Identity) error {
 	cmd := companion.SendTelemetryReqCommand{PublicKey: peer.PublicKey()}
-	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
-	return err
+	return c.sendExpectSent(ctx, cmd.ToBytes())
 }
 
 // GetCustomVars retrieves custom variables from the device.
@@ -591,7 +656,7 @@ func (c *Client) GetCustomVars(ctx context.Context) (companion.CustomVarsRespons
 	if err != nil {
 		return companion.CustomVarsResponse{}, err
 	}
-	return resp.Data.(companion.CustomVarsResponse), nil
+	return as[companion.CustomVarsResponse](resp)
 }
 
 // SetCustomVar sets a custom variable on the device.
@@ -608,14 +673,13 @@ func (c *Client) GetAdvertPath(ctx context.Context, peer meshcore.Identity) (com
 	if err != nil {
 		return companion.AdvertPathResponse{}, err
 	}
-	return resp.Data.(companion.AdvertPathResponse), nil
+	return as[companion.AdvertPathResponse](resp)
 }
 
-// SendBinaryReq sends a binary request to a remote node and waits for Ok.
+// SendBinaryReq sends a binary request to a remote node.
 func (c *Client) SendBinaryReq(ctx context.Context, peer meshcore.Identity, data []byte) error {
 	cmd := companion.SendBinaryReqCommand{PublicKey: peer.PublicKey(), RequestData: data}
-	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
-	return err
+	return c.sendExpectSent(ctx, cmd.ToBytes())
 }
 
 // FactoryReset performs a factory reset. The device reboots after this.
@@ -630,7 +694,7 @@ func (c *Client) SendPathDiscoveryReq(ctx context.Context, peer meshcore.Identit
 	if err != nil {
 		return companion.SentResponse{}, err
 	}
-	return resp.Data.(companion.SentResponse), nil
+	return as[companion.SentResponse](resp)
 }
 
 // SendRawData sends raw data over a path and waits for Ok.
@@ -654,7 +718,7 @@ func (c *Client) GetStats(ctx context.Context, statsType byte) (companion.StatsR
 	if err != nil {
 		return companion.StatsResponse{}, err
 	}
-	return resp.Data.(companion.StatsResponse), nil
+	return as[companion.StatsResponse](resp)
 }
 
 // SendAnonReq sends an anonymous request to a remote node and returns the extended SentResponse.
@@ -664,7 +728,7 @@ func (c *Client) SendAnonReq(ctx context.Context, peer meshcore.Identity, data [
 	if err != nil {
 		return companion.SentResponse{}, err
 	}
-	return resp.Data.(companion.SentResponse), nil
+	return as[companion.SentResponse](resp)
 }
 
 // SetAutoAddConfig configures auto-add behavior.
@@ -683,7 +747,7 @@ func (c *Client) GetAutoAddConfig(ctx context.Context) (companion.AutoAddConfigR
 	if err != nil {
 		return companion.AutoAddConfigResponse{}, err
 	}
-	return resp.Data.(companion.AutoAddConfigResponse), nil
+	return as[companion.AutoAddConfigResponse](resp)
 }
 
 // GetAllowedRepeatFreq retrieves the allowed repeater frequencies.
@@ -695,7 +759,7 @@ func (c *Client) GetAllowedRepeatFreq(ctx context.Context) (companion.AllowedRep
 	if err != nil {
 		return companion.AllowedRepeatFreqResponse{}, err
 	}
-	return resp.Data.(companion.AllowedRepeatFreqResponse), nil
+	return as[companion.AllowedRepeatFreqResponse](resp)
 }
 
 // SetPathHashMode sets the path hash mode (0-2).
@@ -745,6 +809,18 @@ func (c *Client) SendChannelData(ctx context.Context, channelIdx byte, path []by
 	return err
 }
 
+// SendChannelDataFlood floods a group datagram.
+func (c *Client) SendChannelDataFlood(ctx context.Context, channelIdx byte, dataType uint16, payload []byte) error {
+	cmd := companion.SendChannelDataCommand{
+		ChannelIdx: channelIdx,
+		Flood:      true,
+		DataType:   dataType,
+		Payload:    payload,
+	}
+	_, err := c.sendAndWait(ctx, cmd.ToBytes(), companion.RespOk, companion.RespErr)
+	return err
+}
+
 // Reboot reboots the device. Does not wait for a response.
 func (c *Client) Reboot() error {
 	return c.send(companion.RebootCommand{}.ToBytes())
@@ -759,7 +835,7 @@ func (c *Client) SignStart(ctx context.Context) (companion.SignStartResponse, er
 	if err != nil {
 		return companion.SignStartResponse{}, err
 	}
-	return resp.Data.(companion.SignStartResponse), nil
+	return as[companion.SignStartResponse](resp)
 }
 
 // SignData feeds data into an active signing session and waits for Ok.
@@ -778,7 +854,7 @@ func (c *Client) SignFinish(ctx context.Context) (companion.SignatureResponse, e
 	if err != nil {
 		return companion.SignatureResponse{}, err
 	}
-	return resp.Data.(companion.SignatureResponse), nil
+	return as[companion.SignatureResponse](resp)
 }
 
 // SetTuningParams configures mesh network tuning parameters and waits for Ok.
@@ -797,7 +873,7 @@ func (c *Client) GetTuningParams(ctx context.Context) (companion.TuningParamsRes
 	if err != nil {
 		return companion.TuningParamsResponse{}, err
 	}
-	return resp.Data.(companion.TuningParamsResponse), nil
+	return as[companion.TuningParamsResponse](resp)
 }
 
 // SetDefaultFloodScope sets the default flood scope name and key and waits for Ok.
@@ -823,7 +899,7 @@ func (c *Client) GetDefaultFloodScope(ctx context.Context) (companion.DefaultFlo
 	if err != nil {
 		return companion.DefaultFloodScopeResponse{}, err
 	}
-	return resp.Data.(companion.DefaultFloodScopeResponse), nil
+	return as[companion.DefaultFloodScopeResponse](resp)
 }
 
 // SendRawPacket sends a fully-formed raw mesh packet at the given priority and waits for Ok.
@@ -852,17 +928,17 @@ func (e *DeviceError) Error() string {
 		return "device error"
 	}
 	switch e.Code {
-	case companion.ErrUnsupportedCmd:
+	case companion.ErrCodeUnsupportedCmd:
 		return "device error: unsupported command"
-	case companion.ErrNotFound:
+	case companion.ErrCodeNotFound:
 		return "device error: not found"
-	case companion.ErrTableFull:
+	case companion.ErrCodeTableFull:
 		return "device error: table full"
-	case companion.ErrBadState:
+	case companion.ErrCodeBadState:
 		return "device error: bad state"
-	case companion.ErrFileIoError:
+	case companion.ErrCodeFileIoError:
 		return "device error: file I/O error"
-	case companion.ErrIllegalArg:
+	case companion.ErrCodeIllegalArg:
 		return "device error: illegal argument"
 	default:
 		return fmt.Sprintf("device error: code %d", e.Code)
@@ -870,6 +946,19 @@ func (e *DeviceError) Error() string {
 }
 
 func toError(resp companion.Response) error {
-	data := resp.Data.(companion.ErrResponse)
+	data, err := as[companion.ErrResponse](resp)
+	if err != nil {
+		return err
+	}
 	return &DeviceError{Code: data.ErrorCode, HasCode: data.HasErrorCode}
+}
+
+// as extracts the typed payload of a response.
+func as[T any](resp companion.Response) (T, error) {
+	v, ok := resp.Data.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("companion: response 0x%02x carried %T, want %T", resp.Code, resp.Data, zero)
+	}
+	return v, nil
 }

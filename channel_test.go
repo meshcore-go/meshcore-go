@@ -1,6 +1,9 @@
 package meshcore
 
-import "testing"
+import (
+	"encoding/hex"
+	"testing"
+)
 
 func TestNewChannelFromPSK(t *testing.T) {
 	psk := make([]byte, 16)
@@ -92,5 +95,19 @@ func TestDeriveChannelHash(t *testing.T) {
 	ch := NewChannelFromHashtag("hello")
 	if hash != ch.Hash {
 		t.Errorf("DeriveChannelHash = 0x%02x, want 0x%02x from NewChannelFromHashtag", hash, ch.Hash)
+	}
+}
+
+func TestHashtagChannel_FirmwareVector(t *testing.T) {
+	psk := DeriveHashtagPSK("test")
+	if got := hex.EncodeToString(psk[:]); got != "9cd8fcf22a47333b591d96a2b848b73f" {
+		t.Fatalf("DeriveHashtagPSK(test) = %s", got)
+	}
+	if got := DeriveChannelHash(psk); got != 0xd9 {
+		t.Fatalf("DeriveChannelHash = 0x%02x, want 0xd9", got)
+	}
+	ch := NewChannelFromHashtag("#test")
+	if ch.PSK != psk || ch.Hash != 0xd9 || ch.Name != "#test" {
+		t.Fatalf("NewChannelFromHashtag = %+v", ch)
 	}
 }

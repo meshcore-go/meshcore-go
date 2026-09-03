@@ -35,11 +35,11 @@ func TestCompanionModem_SendData(t *testing.T) {
 	}
 
 	cmd := mt.sent[0]
-	if cmd[0] != companion.CmdSendRawData {
-		t.Errorf("command byte = 0x%02x, want 0x%02x", cmd[0], companion.CmdSendRawData)
+	if cmd[0] != companion.CmdSendRawPacket {
+		t.Errorf("command byte = 0x%02x, want 0x%02x", cmd[0], companion.CmdSendRawPacket)
 	}
-	if cmd[1] != 0x00 {
-		t.Errorf("path length = %d, want 0", cmd[1])
+	if cmd[1] != DefaultModemPriority {
+		t.Errorf("priority = %d, want %d", cmd[1], DefaultModemPriority)
 	}
 	got := cmd[2:]
 	if len(got) != len(payload) {
@@ -74,11 +74,11 @@ func TestCompanionModem_ReceivePush(t *testing.T) {
 	})
 
 	mt.fireResponse(companion.Response{
-		Code: companion.PushRawData,
-		Data: companion.PushRawDataResponse{
+		Code: companion.PushLogRxData,
+		Data: companion.PushLogRxDataResponse{
 			LastSNR:  -5,
 			LastRSSI: -42,
-			Payload:  []byte{0xAA, 0xBB, 0xCC},
+			Raw:      []byte{0xAA, 0xBB, 0xCC},
 		},
 	})
 
@@ -110,11 +110,11 @@ func TestCompanionModem_NoHandlerNoPanic(t *testing.T) {
 	defer m.Close()
 
 	mt.fireResponse(companion.Response{
-		Code: companion.PushRawData,
-		Data: companion.PushRawDataResponse{
+		Code: companion.PushLogRxData,
+		Data: companion.PushLogRxDataResponse{
 			LastSNR:  0,
 			LastRSSI: 0,
-			Payload:  []byte{0x01},
+			Raw:      []byte{0x01},
 		},
 	})
 }
@@ -180,5 +180,46 @@ func TestCompanionModem_OutboundHandlerCalledBeforeSend(t *testing.T) {
 
 	if len(captured) != 2 || captured[0] != 0xDE || captured[1] != 0xAD {
 		t.Errorf("outbound handler got %X, want DEAD", captured)
+	}
+}
+
+func TestCompanionModem_IgnoresRawDataPush(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	m := NewCompanionModem(context.Background(), c)
+	defer m.Close()
+
+	called := make(chan struct{}, 1)
+	m.SetDataHandler(func([]byte, float32, int8, bool) { called <- struct{}{} })
+
+	mt.fireResponse(companion.Response{
+		Code: companion.PushRawData,
+		Data: companion.PushRawDataResponse{Payload: []byte{0x01, 0x02}},
+	})
+	select {
+	case <-called:
+		t.Fatal("data handler called for PushRawData")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestCompanionModem_CloseUnsubscribes(t *testing.T) {
+	mt := &mockTransport{}
+	c := New(mt)
+	m := NewCompanionModem(context.Background(), c)
+
+	called := make(chan struct{}, 1)
+	m.SetDataHandler(func([]byte, float32, int8, bool) { called <- struct{}{} })
+	m.Close()
+	m.Close() // idempotent
+
+	mt.fireResponse(companion.Response{
+		Code: companion.PushLogRxData,
+		Data: companion.PushLogRxDataResponse{Raw: []byte{0x01}},
+	})
+	select {
+	case <-called:
+		t.Fatal("data handler called after Close")
+	case <-time.After(20 * time.Millisecond):
 	}
 }

@@ -32,15 +32,13 @@ type Node struct {
 	secrets    *secretCache
 	acks       *ackTracker
 	retries    *retryTracker
-	channels   channelTable
+	channels   *channelTable
 	regions    *RegionMap
 	log        *slog.Logger
 	txCfg      nodeTxConfig
 
 	advertData     *meshcore.AdvertAppData
 	advertInterval time.Duration
-
-	learnedPathsOnly bool
 
 	cbMu         sync.RWMutex
 	errH         func(error)
@@ -54,7 +52,23 @@ type Node struct {
 	done     chan struct{}
 }
 
-type Option func(*Node)
+type nodeConfig struct {
+	errH             func(error)
+	log              *slog.Logger
+	allowForward     func(*meshcore.Packet) bool
+	allowPacket      func(*meshcore.Packet) bool
+	maxPeers         int
+	learnedPathsOnly bool
+	advertData       *meshcore.AdvertAppData
+	advertInterval   time.Duration
+	channels         []*meshcore.ChannelEntry
+	maxChannels      int
+	regions          []*meshcore.Region
+	tx               nodeTxConfig
+}
+
+// Option configures a Node.
+type Option func(*nodeConfig)
 
 type nodeTxConfig struct {
 	airtimeFactor    float64
@@ -64,134 +78,144 @@ type nodeTxConfig struct {
 }
 
 func WithErrorHandler(h func(error)) Option {
-	return func(n *Node) {
-		n.errH = h
+	return func(c *nodeConfig) {
+		c.errH = h
 	}
 }
 
 func WithLogger(l *slog.Logger) Option {
-	return func(n *Node) {
-		n.log = l
+	return func(c *nodeConfig) {
+		c.log = l
 	}
 }
 
 func WithAllowForwardHandler(f func(*meshcore.Packet) bool) Option {
-	return func(n *Node) {
-		n.allowForward = f
+	return func(c *nodeConfig) {
+		c.allowForward = f
 	}
 }
 
 func WithAllowPacketHandler(f func(*meshcore.Packet) bool) Option {
-	return func(n *Node) {
-		n.allowPacket = f
+	return func(c *nodeConfig) {
+		c.allowPacket = f
 	}
 }
 
-func WithMaxPeers(max int) Option {
-	return func(n *Node) {
-		n.peers = NewPeerTable(max)
+func WithMaxPeers(maxPeers int) Option {
+	return func(c *nodeConfig) {
+		c.maxPeers = maxPeers
 	}
 }
 
 // WithLearnedPathsOnly stops adverts from setting OutPath, so sends flood until a
-// path is learned via the peer table's SetOutPath. Order-independent with respect
-// to the other options.
+// path is learned via the peer table's SetOutPath.
 func WithLearnedPathsOnly() Option {
-	return func(n *Node) {
-		n.learnedPathsOnly = true
+	return func(c *nodeConfig) {
+		c.learnedPathsOnly = true
 	}
 }
 
 func WithAdvertData(data meshcore.AdvertAppData) Option {
-	return func(n *Node) {
-		n.advertData = &data
+	return func(c *nodeConfig) {
+		c.advertData = &data
 	}
 }
 
 func WithAdvertInterval(d time.Duration) Option {
-	return func(n *Node) {
-		n.advertInterval = d
+	return func(c *nodeConfig) {
+		c.advertInterval = d
 	}
 }
 
 // WithChannels pre-populates channels starting at index 0.
 // Entries beyond the configured max channels are silently ignored.
 func WithChannels(chs ...*meshcore.ChannelEntry) Option {
-	return func(n *Node) {
-		for i, ch := range chs {
-			if i >= n.channels.maxChannels() {
-				break
-			}
-			n.channels.channels[i] = ch
-		}
+	return func(c *nodeConfig) {
+		c.channels = chs
 	}
 }
 
 func WithRegions(regions ...*meshcore.Region) Option {
-	return func(n *Node) {
-		for _, r := range regions {
-			n.regions.Add(r)
-		}
+	return func(c *nodeConfig) {
+		c.regions = append(c.regions, regions...)
 	}
 }
 
 func WithAirtimeEstimator(est AirtimeEstimator) Option {
-	return func(n *Node) {
-		n.txCfg.airtimeEstimator = est
+	return func(c *nodeConfig) {
+		c.tx.airtimeEstimator = est
 	}
 }
 
 func WithAirtimeFactor(factor float64) Option {
-	return func(n *Node) {
-		n.txCfg.airtimeFactor = factor
+	return func(c *nodeConfig) {
+		c.tx.airtimeFactor = factor
 	}
 }
 
 func WithDutyCycleWindow(d time.Duration) Option {
-	return func(n *Node) {
-		n.txCfg.dutyCycleWindow = d
+	return func(c *nodeConfig) {
+		c.tx.dutyCycleWindow = d
 	}
 }
 
-func WithMaxTxQueue(max int) Option {
-	return func(n *Node) {
-		n.txCfg.maxTxQueue = max
+func WithMaxTxQueue(size int) Option {
+	return func(c *nodeConfig) {
+		c.tx.maxTxQueue = size
 	}
 }
 
-func WithMaxChannels(max int) Option {
-	return func(n *Node) {
-		n.channels = newChannelTable(max)
+func WithMaxChannels(maxChannels int) Option {
+	return func(c *nodeConfig) {
+		c.maxChannels = maxChannels
 	}
 }
 
 func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
-	n := &Node{
-		identity: identity,
-		radio:    radio,
-		peers:    NewPeerTable(DefaultMaxPeers),
-		secrets:  newSecretCache(identity),
-		channels: newChannelTable(DefaultMaxChannels),
-		regions:  NewRegionMap(),
-		txCfg: nodeTxConfig{
+	cfg := nodeConfig{
+		maxPeers:       DefaultMaxPeers,
+		maxChannels:    DefaultMaxChannels,
+		advertInterval: DefaultAdvertInterval,
+		tx: nodeTxConfig{
 			airtimeFactor:   DefaultAirtimeFactor,
 			dutyCycleWindow: DefaultDutyCycleWindow,
 			maxTxQueue:      DefaultMaxTxQueue,
 		},
-		advertInterval: DefaultAdvertInterval,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.log == nil {
+		cfg.log = slog.Default()
+	}
+
+	n := &Node{
+		identity:       identity,
+		radio:          radio,
+		peers:          NewPeerTable(cfg.maxPeers),
+		secrets:        newSecretCache(identity),
+		channels:       newChannelTable(cfg.maxChannels),
+		regions:        NewRegionMap(),
+		log:            cfg.log,
+		txCfg:          cfg.tx,
+		advertData:     cfg.advertData,
+		advertInterval: cfg.advertInterval,
+		errH:           cfg.errH,
+		allowForward:   cfg.allowForward,
+		allowPacket:    cfg.allowPacket,
 		handlers:       make(map[byte][]PacketHandler),
 		done:           make(chan struct{}),
 	}
+	n.peers.learnedPathsOnly = cfg.learnedPathsOnly
+	for i, ch := range cfg.channels {
+		if !n.channels.set(i, ch) {
+			break
+		}
+	}
+	for _, r := range cfg.regions {
+		n.regions.Add(r)
+	}
 	n.router.node = n
-	for _, opt := range opts {
-		opt(n)
-	}
-	// Applied after options so it survives WithMaxPeers replacing the table,
-	// regardless of option order.
-	n.peers.learnedPathsOnly = n.learnedPathsOnly
-	if n.log == nil {
-		n.log = slog.Default()
-	}
 
 	txRadio, ok := radio.(TxRadio)
 	if !ok {
@@ -251,13 +275,6 @@ func (n *Node) SetIdentity(id meshcore.LocalIdentity) {
 	n.identity = id
 	n.secrets.reset(id)
 	n.identityMu.Unlock()
-}
-
-func (n *Node) getIdentity() meshcore.LocalIdentity {
-	n.identityMu.RLock()
-	id := n.identity
-	n.identityMu.RUnlock()
-	return id
 }
 
 func (n *Node) Radio() Radio {
@@ -422,6 +439,10 @@ func (n *Node) SendGroupText(
 	maxRetries int,
 	onResult func(GroupSendResult),
 ) error {
+	if pathHashSize == 0 {
+		pathHashSize = 1
+	}
+
 	grp, err := payload.Encrypt(ch.Hash, ch.PSK[:])
 	if err != nil {
 		return err
@@ -438,7 +459,7 @@ func (n *Node) SendGroupText(
 		Payload:    grpBytes,
 	}
 
-	if err := n.sendPacketRaw(pkt); err != nil {
+	if err := n.SendPacket(pkt); err != nil {
 		return err
 	}
 
@@ -472,7 +493,7 @@ func (n *Node) SendTextMessage(
 		pathHashSize = 1 // 0 is invalid: it would divide-by-zero below and corrupt PathLength
 	}
 
-	self := n.getIdentity()
+	self := n.Identity()
 	secret, err := n.secrets.get(peer)
 	if err != nil {
 		return err
@@ -491,7 +512,7 @@ func (n *Node) SendTextMessage(
 	// otherwise the packet floods.
 	compose := func(attempt int, useDirect bool) (*meshcore.Packet, uint32, error) {
 		plaintext := meshcore.BuildTextPlaintextWithAttempt(timestamp, flags, text, attempt)
-		ackCRC := meshcore.CalcAckHash(plaintext, self.PublicKeyBytes())
+		ackCRC := meshcore.CalcAckHash(textAckHashInput(plaintext, len(text)), self.PublicKeyBytes())
 
 		msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
 		if err != nil {
@@ -573,6 +594,11 @@ func (n *Node) SendTextMessage(
 	registerACK(ackCRC)
 
 	return nil
+}
+
+// textAckHashInput returns the plaintext bytes the ACK hash covers, excluding the attempt tail.
+func textAckHashInput(plaintext []byte, textLen int) []byte {
+	return plaintext[:5+textLen]
 }
 
 func (n *Node) TxQueueLen() int {

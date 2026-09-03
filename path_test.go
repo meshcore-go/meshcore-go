@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -312,4 +313,83 @@ func TestPathRoundTrip(t *testing.T) {
 	if gotTrimmed != string(plaintext) {
 		t.Errorf("Decrypt() = %q, want %q", gotTrimmed, plaintext)
 	}
+}
+
+func TestParsePathPayload(t *testing.T) {
+	plain := []byte{0x02, 0xAA, 0xBB, PayloadTypeAck | 0xF0, 1, 2, 3, 4, 0, 0}
+	p, err := ParsePathPayload(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hs := p.PathHashes(); len(hs) != 2 || hs[0][0] != 0xAA || hs[1][0] != 0xBB {
+		t.Errorf("path hashes = %x", hs)
+	}
+	if p.ExtraType != PayloadTypeAck || len(p.Extra) != 6 || p.Extra[0] != 1 {
+		t.Errorf("extra type %d data %x", p.ExtraType, p.Extra)
+	}
+
+	for _, bad := range []byte{0xC1, 0x40 | 40} {
+		if _, err := ParsePathPayload([]byte{bad, 0, 0}); err == nil {
+			t.Errorf("path_len 0x%02x accepted, want error", bad)
+		}
+	}
+	if _, err := ParsePathPayload([]byte{0x03, 0xAA, 0xBB}); err == nil {
+		t.Error("truncated path accepted, want error")
+	}
+}
+
+func TestPathDecryptStruct(t *testing.T) {
+	_, aliceSeed, alicePub := generateTestKeyPair(t)
+	_, bobSeed, bobPub := generateTestKeyPair(t)
+	sharedAlice, err := DeriveSharedSecret(aliceSeed, bobPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedBob, err := DeriveSharedSecret(bobSeed, alicePub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain := []byte{0x01, 0xAA, PayloadTypeAck, 1, 2, 3, 4}
+	encrypted, err := EncryptThenMAC(sharedAlice, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := &Path{MAC: [2]byte{encrypted[0], encrypted[1]}, EncryptedPayload: encrypted[2:]}
+
+	got, err := path.DecryptStruct(sharedBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PathHashCount() != 1 || got.Path[0] != 0xAA || got.ExtraType != PayloadTypeAck || got.Extra[0] != 1 {
+		t.Errorf("DecryptStruct() = %+v", got)
+	}
+
+	if _, err := path.DecryptStruct(make([]byte, 32)); !errors.Is(err, ErrBadMAC) {
+		t.Errorf("DecryptStruct() with wrong key: error = %v, want ErrBadMAC", err)
+	}
+}
+
+func FuzzParsePathPayload(f *testing.F) {
+	f.Add([]byte{0x02, 0xAA, 0xBB, PayloadTypeAck | 0xF0, 1, 2, 3, 4, 0, 0})
+	f.Add([]byte{0x01, 0xAA, PayloadTypeAck, 1, 2, 3, 4})
+	f.Add([]byte{0x00, 0x00})
+	f.Add([]byte{0xC1, 0, 0})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, plain []byte) {
+		p, err := ParsePathPayload(plain)
+		if err != nil {
+			return
+		}
+		hs := p.PathHashes()
+		if len(hs) != int(p.PathHashCount()) {
+			t.Fatalf("PathHashes() = %d hashes, header says %d", len(hs), p.PathHashCount())
+		}
+		if p.ExtraType&^PacketTypeMask != 0 {
+			t.Fatalf("ExtraType 0x%02x has reserved bits set", p.ExtraType)
+		}
+		if 1+len(p.Path)+1+len(p.Extra) != len(plain) {
+			t.Fatalf("fields do not tile the input: %d+%d vs %d", len(p.Path), len(p.Extra), len(plain))
+		}
+	})
 }

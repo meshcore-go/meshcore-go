@@ -3,7 +3,9 @@ package hardware
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -16,6 +18,7 @@ type mockTransport struct {
 	errorH   func(error)
 	connectF func(ctx context.Context) error
 	dead     chan struct{}
+	closed   atomic.Bool
 }
 
 func newMockTransport() *mockTransport {
@@ -29,7 +32,7 @@ func (m *mockTransport) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockTransport) Close() error { return nil }
+func (m *mockTransport) Close() error { m.closed.Store(true); return nil }
 
 func (m *mockTransport) Send(data []byte) error {
 	m.mu.Lock()
@@ -619,7 +622,7 @@ func TestModem_HandlerWorkers(t *testing.T) {
 		mu.Unlock()
 	})
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		mt.injectFrame(makeDataFrame([]byte{byte(i)}))
 	}
 	modem.Flush()
@@ -668,7 +671,7 @@ func TestModem_Stats_DroppedFrames(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Fill buffer and force drops
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		mt.injectFrame(makeDataFrame([]byte{byte(i + 2)}))
 	}
 
@@ -726,7 +729,7 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 // sendAndAwait runs SendData (which blocks under TX flow control) in a
 // goroutine, waits until the modem has marked the TX pending, then delivers the
 // given hardware response frame and returns SendData's result.
-func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resp *KissFrame) error {
+func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissFrame) error {
 	t.Helper()
 	errCh := make(chan error, 1)
 	go func() { errCh <- m.SendData([]byte{0x01}) }()
@@ -738,7 +741,9 @@ func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resp *KissFrame
 		}
 		time.Sleep(time.Millisecond)
 	}
-	mt.injectFrame(resp)
+	for _, resp := range resps {
+		mt.injectFrame(resp)
+	}
 
 	select {
 	case err := <-errCh:
@@ -781,12 +786,58 @@ func TestModem_TxFlowControl_DoneMissingByte(t *testing.T) {
 	}
 }
 
-// HW_RESP_ERROR carrying HW_ERR_TX_BUSY → SendData returns ErrTxBusy.
 func TestModem_TxFlowControl_Busy(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
-	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_ERROR, HW_ERR_TX_BUSY}}
-	if err := sendAndAwait(t, m, mt, frame); !errors.Is(err, ErrTxBusy) {
-		t.Errorf("SendData on HW_ERR_TX_BUSY = %v, want ErrTxBusy", err)
+	busy := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_ERROR, HW_ERR_TX_BUSY}}
+	done := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_TX_DONE, 0x01}}
+	if err := sendAndAwait(t, m, mt, busy, done); err != nil {
+		t.Errorf("SendData on TX_BUSY then TX_DONE = %v, want nil", err)
+	}
+}
+
+func TestModem_SendData_RejectsBadSizes(t *testing.T) {
+	mt := newMockTransport()
+	modem := NewKissModem(mt, WithTxFlowControl(0))
+	defer modem.Close()
+
+	if err := modem.SendData(nil); !errors.Is(err, ErrPacketSize) {
+		t.Errorf("SendData(empty) = %v, want ErrPacketSize", err)
+	}
+	if err := modem.SendData(make([]byte, KISS_MAX_PACKET_SIZE+1)); !errors.Is(err, ErrPacketSize) {
+		t.Errorf("SendData(256) = %v, want ErrPacketSize", err)
+	}
+	if got := len(mt.sentFrames()); got != 0 {
+		t.Fatalf("rejected payloads reached the transport: %d frames", got)
+	}
+	if err := modem.SendData(make([]byte, KISS_MAX_PACKET_SIZE)); err != nil {
+		t.Errorf("SendData(255) = %v, want nil", err)
+	}
+	if got := len(mt.sentFrames()); got != 1 {
+		t.Errorf("sent frames = %d, want 1", got)
+	}
+}
+
+func TestModem_CloseFromHandler(t *testing.T) {
+	for _, workers := range []int{0, 2} {
+		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
+			mt := newMockTransport()
+			modem := NewKissModem(mt, WithHandlerWorkers(workers))
+			returned := make(chan error, 1)
+			modem.SetFrameHandler(func(*KissFrame) { returned <- modem.Close() })
+
+			mt.injectFrame(makeDataFrame([]byte{0x01}))
+			select {
+			case err := <-returned:
+				if err != nil {
+					t.Fatalf("Close() = %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Close() from handler deadlocked")
+			}
+			if !mt.closed.Load() {
+				t.Error("transport not closed")
+			}
+		})
 	}
 }

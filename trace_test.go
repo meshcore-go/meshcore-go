@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"bytes"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -277,4 +278,42 @@ func TestTraceRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTraceFromBytes_PathNotMultipleOfHashSize(t *testing.T) {
+	data, _ := hex.DecodeString("0102030405060708" + "02" + "AABBCCDDEE")
+	tr, err := TraceFromBytes(data)
+	if err != nil {
+		t.Fatalf("TraceFromBytes: %v", err)
+	}
+	if tr.PathHashSize() != 4 || len(tr.PathHashes) != 5 {
+		t.Fatalf("PathHashSize %d, %d path bytes", tr.PathHashSize(), len(tr.PathHashes))
+	}
+	out, _ := tr.ToBytes()
+	if !bytes.Equal(out, data) {
+		t.Fatalf("round trip %x != %x", out, data)
+	}
+}
+
+func FuzzTraceFromBytes(f *testing.F) {
+	for _, h := range []string{"01020304050607080A", "01020304050607080ABCDEF0A1B2", "0102030405060708", ""} {
+		b, _ := hex.DecodeString(h)
+		f.Add(b)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		tr, err := TraceFromBytes(data)
+		if err != nil {
+			return
+		}
+		if s := tr.PathHashSize(); s != 1 && s != 2 && s != 4 && s != 8 {
+			t.Fatalf("PathHashSize() = %d", s)
+		}
+		out, err := tr.ToBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out, data) {
+			t.Fatalf("round trip mismatch:\n in  %x\n out %x", data, out)
+		}
+	})
 }

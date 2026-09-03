@@ -6,6 +6,7 @@ import (
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
 
+// RegionMap is a thread-safe set of regions stored by pointer; treat a Region as immutable once added.
 type RegionMap struct {
 	mu       sync.RWMutex
 	regions  []*meshcore.Region
@@ -25,7 +26,8 @@ func NewRegionMap() *RegionMap {
 func (rm *RegionMap) Wildcard() *meshcore.Region {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return &rm.wildcard
+	w := rm.wildcard
+	return &w
 }
 
 func (rm *RegionMap) SetWildcardFlags(flags uint8) {
@@ -115,5 +117,6 @@ func (rm *RegionMap) FindFloodMatch(pkt *meshcore.Packet) *meshcore.Region {
 	if rm.wildcard.Flags&meshcore.RegionDenyFlood != 0 {
 		return nil
 	}
-	return &rm.wildcard
+	w := rm.wildcard
+	return &w
 }

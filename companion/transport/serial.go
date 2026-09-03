@@ -22,9 +22,12 @@ func (c *serialConn) Close() error {
 	return c.Port.Close()
 }
 
+// SerialTransport is a Transport over a serial port.
 type SerialTransport struct {
 	*baseTransport
 }
+
+var _ Transport = (*SerialTransport)(nil)
 
 func NewSerialTransport(config SerialConfig) *SerialTransport {
 	dial := func(_ context.Context) (Conn, error) {
@@ -44,40 +47,4 @@ func NewSerialTransport(config SerialConfig) *SerialTransport {
 	return &SerialTransport{
 		baseTransport: newBaseTransport(dial, config.BaseConfig),
 	}
-}
-
-func (t *SerialTransport) Connect(ctx context.Context) error {
-	return t.baseTransport.connect(ctx)
-}
-
-func (t *SerialTransport) Close() error {
-	return t.baseTransport.close()
-}
-
-func (t *SerialTransport) Send(command []byte) error {
-	return t.baseTransport.send(command)
-}
-
-func (t *SerialTransport) SetResponseHandler(h ResponseHandler) {
-	t.mu.Lock()
-	t.onResponse = h
-	t.mu.Unlock()
-}
-
-func (t *SerialTransport) SetErrorHandler(h ErrorHandler) {
-	t.mu.Lock()
-	t.onError = h
-	t.mu.Unlock()
-}
-
-func (t *SerialTransport) SetDisconnectHandler(h func()) {
-	t.mu.Lock()
-	t.onDisconnect = h
-	t.mu.Unlock()
-}
-
-func (t *SerialTransport) SetReconnectHandler(h func()) {
-	t.mu.Lock()
-	t.onReconnect = h
-	t.mu.Unlock()
 }
