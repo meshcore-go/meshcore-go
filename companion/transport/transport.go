@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/meshcore-go/meshcore-go/companion"
 )
+
+// ErrClosed is returned by Send after Close.
+var ErrClosed = errors.New("transport: closed")
 
 type ResponseHandler = func(companion.Response)
 
@@ -47,27 +51,31 @@ type BaseConfig struct {
 	Logger *slog.Logger
 }
 
+// baseTransport implements Transport over any Conn from a DialFunc, with automatic reconnection.
 type baseTransport struct {
 	dial   DialFunc
 	config BaseConfig
 	parser *companion.FrameParser
-	conn   Conn
 	log    *slog.Logger
 
-	onResponse   ResponseHandler
-	onError      ErrorHandler
-	onDisconnect func()
-	onReconnect  func()
+	// ctx is cancelled by Close and aborts any reconnect dial in flight.
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      <-chan struct{}
+	closeOnce sync.Once
 
 	inbound chan companion.Response
 	flush   chan chan struct{}
 	drainWg sync.WaitGroup
+	txQueue chan []byte
 
-	mu        sync.Mutex
-	connected bool
-	txQueue   chan []byte
-	done      chan struct{}
-	closeOnce sync.Once
+	mu           sync.Mutex
+	conn         Conn          // nil while disconnected
+	ready        chan struct{} // closed while conn != nil; replaced on disconnect
+	onResponse   ResponseHandler
+	onError      ErrorHandler
+	onDisconnect func()
+	onReconnect  func()
 }
 
 func newBaseTransport(dial DialFunc, config BaseConfig) *baseTransport {
@@ -84,15 +92,19 @@ func newBaseTransport(dial DialFunc, config BaseConfig) *baseTransport {
 		config.InboundBufferSize = 64
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	bt := &baseTransport{
 		dial:    dial,
 		config:  config,
 		parser:  companion.NewFrameParser(),
-		txQueue: make(chan []byte, config.TxQueueSize),
-		done:    make(chan struct{}),
+		log:     config.Logger,
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    ctx.Done(),
 		inbound: make(chan companion.Response, config.InboundBufferSize),
 		flush:   make(chan chan struct{}),
-		log:     config.Logger,
+		txQueue: make(chan []byte, config.TxQueueSize),
+		ready:   make(chan struct{}),
 	}
 	if bt.log == nil {
 		bt.log = slog.Default()
@@ -102,67 +114,91 @@ func newBaseTransport(dial DialFunc, config BaseConfig) *baseTransport {
 	return bt
 }
 
-func (t *baseTransport) connect(ctx context.Context) error {
+// Connect dials once and starts the read and write loops; a lost connection is redialled with backoff.
+func (t *baseTransport) Connect(ctx context.Context) error {
 	conn, err := t.dial(ctx)
 	if err != nil {
 		return err
 	}
+	if !t.setConn(conn) {
+		_ = conn.Close()
+		return ErrClosed
+	}
 
-	t.mu.Lock()
-	t.conn = conn
-	t.connected = true
-	t.mu.Unlock()
-
-	go t.readLoopWithReconnect()
+	go t.readLoopWithReconnect(conn)
 	go t.writeLoop()
 
 	return nil
 }
 
-func (t *baseTransport) drainInbound() {
-	defer t.drainWg.Done()
-	for {
-		select {
-		case resp, ok := <-t.inbound:
-			if !ok {
-				return
-			}
-			t.mu.Lock()
-			h := t.onResponse
-			t.mu.Unlock()
-			if h != nil {
-				h(resp)
-			}
-		case done := <-t.flush:
-			// Drain any remaining buffered responses before signalling.
-			for {
-				select {
-				case resp, ok := <-t.inbound:
-					if !ok {
-						close(done)
-						return
-					}
-					t.mu.Lock()
-					h := t.onResponse
-					t.mu.Unlock()
-					if h != nil {
-						h(resp)
-					}
-				default:
-					close(done)
-					goto cont
-				}
-			}
-		cont:
-		}
-	}
+// Close stops the loops and closes the connection; queued commands are discarded.
+func (t *baseTransport) Close() error {
+	var closeErr error
+	t.closeOnce.Do(func() {
+		t.cancel()
+		t.mu.Lock()
+		conn := t.conn
+		t.mu.Unlock()
+		closeErr = t.dropConn(conn)
+		t.drainWg.Wait()
+	})
+	return closeErr
 }
 
-func (t *baseTransport) enqueueResponse(resp companion.Response) {
+// Send frames a command and queues it; while disconnected it is held until a connection is available.
+func (t *baseTransport) Send(command []byte) error {
 	select {
-	case t.inbound <- resp:
 	case <-t.done:
+		return ErrClosed
+	default:
 	}
+
+	frame, err := companion.FrameEncode(companion.FrameTypeOutgoing, command)
+	if err != nil {
+		return err
+	}
+	select {
+	case t.txQueue <- frame:
+		return nil
+	default:
+	}
+
+	select {
+	case <-t.txQueue:
+	default:
+	}
+	select {
+	case t.txQueue <- frame:
+	default:
+		t.log.Warn("tx queue full, dropped command")
+	}
+	return nil
+}
+
+func (t *baseTransport) SetResponseHandler(h ResponseHandler) {
+	t.mu.Lock()
+	t.onResponse = h
+	t.mu.Unlock()
+}
+
+func (t *baseTransport) SetErrorHandler(h ErrorHandler) {
+	t.mu.Lock()
+	t.onError = h
+	t.mu.Unlock()
+}
+
+// SetDisconnectHandler registers a callback invoked when the connection is lost, before reconnecting.
+func (t *baseTransport) SetDisconnectHandler(h func()) {
+	t.mu.Lock()
+	t.onDisconnect = h
+	t.mu.Unlock()
+}
+
+// SetReconnectHandler registers a callback invoked after a lost connection is re-established.
+func (t *baseTransport) SetReconnectHandler(h func()) {
+	t.mu.Lock()
+	t.onReconnect = h
+	t.mu.Unlock()
 }
 
 // Flush blocks until all currently enqueued responses have been dispatched.
@@ -176,43 +212,88 @@ func (t *baseTransport) Flush() {
 	}
 }
 
-func (t *baseTransport) close() error {
-	var closeErr error
-
-	t.closeOnce.Do(func() {
-		close(t.done)
-
-		t.mu.Lock()
-		t.connected = false
-		if t.conn != nil {
-			closeErr = t.conn.Close()
-		}
-		t.mu.Unlock()
-
-		close(t.inbound)
-		t.drainWg.Wait()
-	})
-
-	return closeErr
-}
-
-func (t *baseTransport) send(command []byte) error {
+// setConn installs conn as the live connection; it refuses after Close.
+func (t *baseTransport) setConn(conn Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	select {
 	case <-t.done:
-		return fmt.Errorf("transport closed")
+		return false
 	default:
 	}
+	if t.conn != nil {
+		_ = t.conn.Close()
+	} else {
+		close(t.ready)
+	}
+	t.conn = conn
+	return true
+}
 
-	cmd := make([]byte, len(command))
-	copy(cmd, command)
+// dropConn closes conn only if it is still the live one.
+func (t *baseTransport) dropConn(conn Conn) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if conn == nil || t.conn != conn {
+		return nil
+	}
+	t.conn = nil
+	t.ready = make(chan struct{})
+	return conn.Close()
+}
 
+// current returns the live connection (nil while disconnected) and a channel closed once one is available.
+func (t *baseTransport) current() (Conn, <-chan struct{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn, t.ready
+}
+
+func (t *baseTransport) dispatchResponse(resp companion.Response) {
+	t.mu.Lock()
+	h := t.onResponse
+	t.mu.Unlock()
+	if h != nil {
+		h(resp)
+	}
+}
+
+func (t *baseTransport) dispatchError(err error) {
+	t.mu.Lock()
+	h := t.onError
+	t.mu.Unlock()
+	if h != nil {
+		h(err)
+	}
+}
+
+// drainInbound is the only goroutine that invokes the response handler; inbound is never closed.
+func (t *baseTransport) drainInbound() {
+	defer t.drainWg.Done()
+	for {
+		select {
+		case <-t.done:
+			return
+		case resp := <-t.inbound:
+			t.dispatchResponse(resp)
+		case done := <-t.flush:
+			for drained := false; !drained; {
+				select {
+				case resp := <-t.inbound:
+					t.dispatchResponse(resp)
+				default:
+					drained = true
+				}
+			}
+			close(done)
+		}
+	}
+}
+
+func (t *baseTransport) enqueueResponse(resp companion.Response) {
 	select {
-	case t.txQueue <- cmd:
-		return nil
-	default:
-		<-t.txQueue
-		t.txQueue <- cmd
-		return nil
+	case t.inbound <- resp:
+	case <-t.done:
 	}
 }
 
@@ -221,50 +302,36 @@ func (t *baseTransport) writeLoop() {
 		select {
 		case <-t.done:
 			return
-		case cmd := <-t.txQueue:
-			t.drainCommand(cmd)
+		case frame := <-t.txQueue:
+			t.drainCommand(frame)
 		}
 	}
 }
 
-func (t *baseTransport) drainCommand(cmd []byte) {
+// drainCommand writes frame on the live connection, waiting for one if needed and retrying after a failed write.
+func (t *baseTransport) drainCommand(frame []byte) {
 	for {
-		t.mu.Lock()
-		connected := t.connected
-		conn := t.conn
-		t.mu.Unlock()
-
-		if !connected {
+		conn, ready := t.current()
+		if conn == nil {
 			select {
 			case <-t.done:
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-ready:
 				continue
 			}
 		}
 
-		if err := writeCommand(conn, cmd); err != nil {
-			t.mu.Lock()
-			t.connected = false
-			if t.conn != nil {
-				_ = t.conn.Close()
-			}
-			t.mu.Unlock()
+		if err := writeFrame(conn, frame); err != nil {
+			_ = t.dropConn(conn)
 			continue
 		}
-
 		return
 	}
 }
 
-func (t *baseTransport) readLoopWithReconnect() {
+func (t *baseTransport) readLoopWithReconnect(conn Conn) {
 	for {
-		t.mu.Lock()
-		conn := t.conn
-		errorFn := t.onError
-		t.mu.Unlock()
-
-		readLoop(conn, t.done, t.parser, t.enqueueResponse, errorFn, t.log)
+		readLoop(conn, t.done, t.parser, t.enqueueResponse, t.dispatchError, t.log)
 
 		select {
 		case <-t.done:
@@ -272,12 +339,7 @@ func (t *baseTransport) readLoopWithReconnect() {
 		default:
 		}
 
-		t.mu.Lock()
-		t.connected = false
-		if t.conn != nil {
-			_ = t.conn.Close()
-		}
-		t.mu.Unlock()
+		_ = t.dropConn(conn)
 
 		t.mu.Lock()
 		disconnectFn := t.onDisconnect
@@ -286,51 +348,45 @@ func (t *baseTransport) readLoopWithReconnect() {
 			disconnectFn()
 		}
 
-		if !t.reconnect() {
+		conn = t.reconnect()
+		if conn == nil {
 			return
 		}
 	}
 }
 
-func (t *baseTransport) reconnect() bool {
+// reconnect redials with exponential backoff; it returns nil if the transport was closed.
+func (t *baseTransport) reconnect() Conn {
 	interval := t.config.ReconnectInterval
 
 	for {
 		select {
 		case <-t.done:
-			return false
+			return nil
 		case <-time.After(interval):
 		}
 
-		conn, err := t.dial(context.Background())
+		conn, err := t.dial(t.ctx)
 		if err != nil {
-			t.mu.Lock()
-			errFn := t.onError
-			t.mu.Unlock()
-			if errFn != nil {
-				errFn(fmt.Errorf("reconnect: %w", err))
-			}
-
-			interval *= 2
-			if interval > t.config.MaxReconnectInterval {
-				interval = t.config.MaxReconnectInterval
-			}
+			t.dispatchError(fmt.Errorf("reconnect: %w", err))
+			interval = min(interval*2, t.config.MaxReconnectInterval)
 			continue
 		}
 
 		t.parser.Reset()
+		if !t.setConn(conn) {
+			_ = conn.Close()
+			return nil
+		}
 
 		t.mu.Lock()
-		t.conn = conn
-		t.connected = true
 		reconnectFn := t.onReconnect
 		t.mu.Unlock()
-
 		if reconnectFn != nil {
 			reconnectFn()
 		}
 
-		return true
+		return conn
 	}
 }
 
@@ -376,10 +432,6 @@ func readLoop(conn io.Reader, done <-chan struct{}, parser *companion.FrameParse
 			}
 			return
 		}
-
-		if n == 0 {
-			continue
-		}
 	}
 }
 
@@ -388,10 +440,12 @@ func writeCommand(conn io.Writer, command []byte) error {
 	if err != nil {
 		return err
 	}
+	return writeFrame(conn, frame)
+}
 
+func writeFrame(conn io.Writer, frame []byte) error {
 	if _, err := conn.Write(frame); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
-
 	return nil
 }

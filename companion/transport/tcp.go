@@ -11,9 +11,12 @@ type TCPConfig struct {
 	BaseConfig
 }
 
+// TCPTransport is a Transport over TCP.
 type TCPTransport struct {
 	*baseTransport
 }
+
+var _ Transport = (*TCPTransport)(nil)
 
 func NewTCPTransport(config TCPConfig) *TCPTransport {
 	dial := func(ctx context.Context) (Conn, error) {
@@ -27,40 +30,4 @@ func NewTCPTransport(config TCPConfig) *TCPTransport {
 	return &TCPTransport{
 		baseTransport: newBaseTransport(dial, config.BaseConfig),
 	}
-}
-
-func (t *TCPTransport) Connect(ctx context.Context) error {
-	return t.baseTransport.connect(ctx)
-}
-
-func (t *TCPTransport) Close() error {
-	return t.baseTransport.close()
-}
-
-func (t *TCPTransport) Send(command []byte) error {
-	return t.baseTransport.send(command)
-}
-
-func (t *TCPTransport) SetResponseHandler(h ResponseHandler) {
-	t.mu.Lock()
-	t.onResponse = h
-	t.mu.Unlock()
-}
-
-func (t *TCPTransport) SetErrorHandler(h ErrorHandler) {
-	t.mu.Lock()
-	t.onError = h
-	t.mu.Unlock()
-}
-
-func (t *TCPTransport) SetDisconnectHandler(h func()) {
-	t.mu.Lock()
-	t.onDisconnect = h
-	t.mu.Unlock()
-}
-
-func (t *TCPTransport) SetReconnectHandler(h func()) {
-	t.mu.Lock()
-	t.onReconnect = h
-	t.mu.Unlock()
 }

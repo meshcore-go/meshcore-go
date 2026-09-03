@@ -52,3 +52,25 @@ func TestLoRaAirtimeEstimator(t *testing.T) {
 		})
 	}
 }
+
+// CR 5..8 (wire form) must estimate identically to 1..4.
+func TestLoRaAirtimeEstimator_CRConventions(t *testing.T) {
+	for _, sf := range []uint8{5, 7, 9, 12} {
+		for cr := uint8(1); cr <= 4; cr++ {
+			lo := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: sf, CR: cr})
+			hi := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: sf, CR: cr + 4})
+			for _, n := range []int{1, 20, 255} {
+				if lo(n) != hi(n) {
+					t.Errorf("SF%d len %d: CR%d=%d ms, CR%d=%d ms", sf, n, cr, lo(n), cr+4, hi(n))
+				}
+			}
+		}
+	}
+}
+
+func TestLoRaAirtimeEstimator_SF5(t *testing.T) {
+	est := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: 5, CR: 5})
+	if got := est(255); got != 138 {
+		t.Errorf("SF5 airtime = %d ms, want 138", got)
+	}
+}

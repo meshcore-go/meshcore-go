@@ -113,23 +113,28 @@ func TestUnescapeData(t *testing.T) {
 }
 
 func TestEscapeUnescapeRoundTrip(t *testing.T) {
-	inputs := [][]byte{
-		{0x01, 0x02, 0x03},
-		{KISS_FEND, KISS_FESC, 0x00, KISS_FEND},
-		{KISS_FESC, KISS_FESC, KISS_FESC},
-		{0xC0, 0xDB, 0xDC, 0xDD},
-		{},
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{"plain bytes", []byte{0x01, 0x02, 0x03}},
+		{"FEND and FESC mixed", []byte{KISS_FEND, KISS_FESC, 0x00, KISS_FEND}},
+		{"consecutive FESC", []byte{KISS_FESC, KISS_FESC, KISS_FESC}},
+		{"all special values", []byte{0xC0, 0xDB, 0xDC, 0xDD}},
+		{"empty", []byte{}},
 	}
 
-	for _, input := range inputs {
-		escaped := EscapeData(input)
-		unescaped, err := UnescapeData(escaped)
-		if err != nil {
-			t.Fatalf("round trip error for %X: %v", input, err)
-		}
-		if !bytes.Equal(unescaped, input) {
-			t.Errorf("round trip failed: input=%X, escaped=%X, unescaped=%X", input, escaped, unescaped)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			escaped := EscapeData(tc.input)
+			unescaped, err := UnescapeData(escaped)
+			if err != nil {
+				t.Fatalf("round trip error for %X: %v", tc.input, err)
+			}
+			if !bytes.Equal(unescaped, tc.input) {
+				t.Errorf("round trip failed: input=%X, escaped=%X, unescaped=%X", tc.input, escaped, unescaped)
+			}
+		})
 	}
 }
 
@@ -314,7 +319,7 @@ func TestExtractFrames(t *testing.T) {
 			name:       "single complete frame",
 			stream:     []byte{KISS_FEND, 0x00, 0x01, 0x02, KISS_FEND},
 			frameCount: 1,
-			remainder:  nil,
+			remainder:  []byte{KISS_FEND},
 		},
 		{
 			name: "two frames",
@@ -323,7 +328,7 @@ func TestExtractFrames(t *testing.T) {
 				[]byte{KISS_FEND, 0x00, 0x02, KISS_FEND}...,
 			),
 			frameCount: 2,
-			remainder:  nil,
+			remainder:  []byte{KISS_FEND},
 		},
 		{
 			name:       "incomplete frame",
@@ -335,7 +340,19 @@ func TestExtractFrames(t *testing.T) {
 			name:       "garbage before frame",
 			stream:     []byte{0x55, 0x66, KISS_FEND, 0x00, 0x01, KISS_FEND},
 			frameCount: 1,
-			remainder:  nil,
+			remainder:  []byte{KISS_FEND},
+		},
+		{
+			name:       "frame followed by inter-frame FEND fill",
+			stream:     []byte{KISS_FEND, 0x00, 0x01, KISS_FEND, KISS_FEND, KISS_FEND},
+			frameCount: 1,
+			remainder:  []byte{KISS_FEND},
+		},
+		{
+			name:       "lone FEND",
+			stream:     []byte{KISS_FEND},
+			frameCount: 0,
+			remainder:  []byte{KISS_FEND},
 		},
 		{
 			name:       "empty stream",
@@ -367,6 +384,29 @@ func TestExtractFrames(t *testing.T) {
 				t.Errorf("remainder = %X, want %X", remainder, tc.remainder)
 			}
 		})
+	}
+}
+
+func TestExtractFrames_SplitAfterOpeningFEND(t *testing.T) {
+	chunks := [][]byte{
+		{KISS_FEND, 0x00, 0x01, 0x02, 0x03, KISS_FEND, KISS_FEND},
+		{0x00, 0x04, 0x05, 0x06, KISS_FEND},
+	}
+	var got []*KissFrame
+	var remainder []byte
+	for _, chunk := range chunks {
+		frames, rem, errs := ExtractFrames(append(remainder, chunk...))
+		if len(errs) != 0 {
+			t.Fatalf("unexpected decode errors: %v", errs)
+		}
+		got = append(got, frames...)
+		remainder = rem
+	}
+	if len(got) != 2 {
+		t.Fatalf("frame count = %d, want 2", len(got))
+	}
+	if !bytes.Equal(got[0].Data, []byte{0x01, 0x02, 0x03}) || !bytes.Equal(got[1].Data, []byte{0x04, 0x05, 0x06}) {
+		t.Errorf("frames = %X / %X, want 010203 / 040506", got[0].Data, got[1].Data)
 	}
 }
 

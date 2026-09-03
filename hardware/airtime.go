@@ -6,30 +6,39 @@ import "math"
 // radio configuration. The returned function computes the LoRa time-on-air
 // in milliseconds for a packet of the given byte length.
 //
-// Uses the standard LoRa modem formula with explicit header, CRC enabled,
-// and low data rate optimization applied when symbol time exceeds 16ms.
+// config.CR may be 1..4 or 5..8 (raw denominator).
 func LoRaAirtimeEstimator(config *RadioConfig) func(packetLen int) uint32 {
 	sf := float64(config.SF)
 	bw := float64(config.BwHz)
-	cr := int(config.CR) // 1..4 → 4/5..4/8
-
-	symbolTimeMs := math.Pow(2, sf) / bw * 1000.0
-	preambleTimeMs := (8 + 4.25) * symbolTimeMs
-
-	lowDataRateOpt := 0
-	if symbolTimeMs >= 16.0 {
-		lowDataRateOpt = 1
+	cr := float64(config.CR)
+	if cr < 5 {
+		cr += 4
 	}
 
+	symbolTimeMs := math.Pow(2, sf) / bw * 1000.0
+
+	sfCoeff1, sfCoeff2 := 4.25, 8.0
+	if config.SF == 5 || config.SF == 6 {
+		sfCoeff1, sfCoeff2 = 6.25, 0
+	}
+
+	sfDivisor := 4 * sf
+	if symbolTimeMs >= 16.0 {
+		sfDivisor = 4 * (sf - 2) // low data rate optimisation
+	}
+	if sfDivisor <= 0 {
+		sfDivisor = 1
+	}
+
+	const bitsPerCrc, headerBits = 16.0, 20.0
+	preambleSymbols := 8 + 8 + sfCoeff1
+
 	return func(packetLen int) uint32 {
-		// Explicit header, CRC enabled
-		numerator := 8*float64(packetLen) - 4*sf + 28 + 16
-		denominator := 4 * (sf - float64(2*lowDataRateOpt))
-		if denominator <= 0 {
-			denominator = 1
+		bitCount := 8*float64(packetLen) + bitsPerCrc - 4*sf + sfCoeff2 + headerBits
+		if bitCount < 0 {
+			bitCount = 0
 		}
-		symbolCount := 8 + math.Max(math.Ceil(numerator/denominator)*float64(cr+4), 0)
-		payloadTimeMs := symbolCount * symbolTimeMs
-		return uint32(math.Ceil(preambleTimeMs + payloadTimeMs))
+		symbolCount := preambleSymbols + math.Ceil(bitCount/sfDivisor)*cr
+		return uint32(math.Ceil(symbolCount * symbolTimeMs))
 	}
 }
