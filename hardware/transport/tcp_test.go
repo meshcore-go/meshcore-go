@@ -152,7 +152,7 @@ func TestTCP_GarbageResync(t *testing.T) {
 	connect(t, tr)
 	modem := s.accept(t)
 
-	garbage := append([]byte{hardware.KISS_FEND}, bytes.Repeat([]byte{0x55}, hardware.KISS_MAX_FRAME_SIZE+100)...)
+	garbage := append([]byte{hardware.KISS_FEND}, bytes.Repeat([]byte{0x55}, hardware.KISS_MAX_ENCODED_FRAME_SIZE+100)...)
 	write(t, modem, garbage)
 	if err := recvErr(t, errs); !strings.Contains(err.Error(), "resync") {
 		t.Fatalf("error = %v, want resync", err)

@@ -208,7 +208,7 @@ func readLoop(conn io.Reader, done <-chan struct{}, dead chan struct{}, cfg read
 			frames, rem, decodeErrs := hardware.ExtractFrames(data)
 			remainder = rem
 
-			if len(remainder) > hardware.KISS_MAX_FRAME_SIZE {
+			if len(remainder) >= hardware.KISS_MAX_ENCODED_FRAME_SIZE {
 				dispatchErr(fmt.Errorf("kiss: remainder exceeded max frame size, resyncing"))
 				remainder = nil
 			}

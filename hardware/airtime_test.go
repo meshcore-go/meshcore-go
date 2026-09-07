@@ -1,59 +1,32 @@
 package hardware
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestLoRaAirtimeEstimator(t *testing.T) {
 	tests := []struct {
 		name   string
-		config RadioConfig
-		pktLen int
-		minMs  uint32
-		maxMs  uint32
+		sf     uint8
+		length int
+		want   uint32
 	}{
-		{
-			name:   "SF7/125kHz/CR5 small packet",
-			config: RadioConfig{FreqHz: 915000000, BwHz: 125000, SF: 7, CR: 1},
-			pktLen: 20,
-			minMs:  40,
-			maxMs:  80,
-		},
-		{
-			name:   "SF12/125kHz/CR5 small packet",
-			config: RadioConfig{FreqHz: 915000000, BwHz: 125000, SF: 12, CR: 1},
-			pktLen: 20,
-			minMs:  1000,
-			maxMs:  2000,
-		},
-		{
-			name:   "SF12/125kHz/CR5 max packet",
-			config: RadioConfig{FreqHz: 915000000, BwHz: 125000, SF: 12, CR: 1},
-			pktLen: 255,
-			minMs:  5000,
-			maxMs:  15000,
-		},
-		{
-			name:   "SF9/250kHz/CR5 medium packet",
-			config: RadioConfig{FreqHz: 915000000, BwHz: 250000, SF: 9, CR: 1},
-			pktLen: 50,
-			minMs:  50,
-			maxMs:  200,
-		},
+		{"SF5 maximum", 5, 255, 144},
+		{"SF6 small", 6, 20, 45},
+		{"SF7 small", 7, 20, 82},
+		{"SF8 small", 8, 20, 153},
+		{"SF9 small", 9, 20, 219},
+		{"SF12 small", 12, 20, 1582},
+		{"SF12 maximum", 12, 255, 9282},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			est := LoRaAirtimeEstimator(&tc.config)
-			got := est(tc.pktLen)
-			if got < tc.minMs || got > tc.maxMs {
-				t.Errorf("got %d ms, want between %d and %d ms", got, tc.minMs, tc.maxMs)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			est := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: tt.sf, CR: 5})
+			if got := est(tt.length); got != tt.want {
+				t.Fatalf("airtime = %d ms, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-// CR 5..8 (wire form) must estimate identically to 1..4.
 func TestLoRaAirtimeEstimator_CRConventions(t *testing.T) {
 	for _, sf := range []uint8{5, 7, 9, 12} {
 		for cr := uint8(1); cr <= 4; cr++ {
@@ -61,16 +34,9 @@ func TestLoRaAirtimeEstimator_CRConventions(t *testing.T) {
 			hi := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: sf, CR: cr + 4})
 			for _, n := range []int{1, 20, 255} {
 				if lo(n) != hi(n) {
-					t.Errorf("SF%d len %d: CR%d=%d ms, CR%d=%d ms", sf, n, cr, lo(n), cr+4, hi(n))
+					t.Errorf("SF%d len%d: CR%d=%d, CR%d=%d", sf, n, cr, lo(n), cr+4, hi(n))
 				}
 			}
 		}
-	}
-}
-
-func TestLoRaAirtimeEstimator_SF5(t *testing.T) {
-	est := LoRaAirtimeEstimator(&RadioConfig{BwHz: 125000, SF: 5, CR: 5})
-	if got := est(255); got != 138 {
-		t.Errorf("SF5 airtime = %d ms, want 138", got)
 	}
 }

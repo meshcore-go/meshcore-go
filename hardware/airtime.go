@@ -31,7 +31,11 @@ func LoRaAirtimeEstimator(config *RadioConfig) func(packetLen int) uint32 {
 	}
 
 	const bitsPerCrc, headerBits = 16.0, 20.0
-	preambleSymbols := 8 + 8 + sfCoeff1
+	preamble := 16.0
+	if config.SF <= 8 {
+		preamble = 32
+	}
+	preambleSymbols := preamble + 8 + sfCoeff1
 
 	return func(packetLen int) uint32 {
 		bitCount := 8*float64(packetLen) + bitsPerCrc - 4*sf + sfCoeff2 + headerBits

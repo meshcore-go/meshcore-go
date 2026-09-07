@@ -15,13 +15,17 @@ const rxMetaTimeout = 1 * time.Second
 // DefaultInboundBuffer is the default capacity of the inbound frame channel.
 const DefaultInboundBuffer = 1024
 
-const DefaultTxTimeout = 5 * time.Second
+// DefaultTxTimeout is the TX_DONE wait without WithTxAirtimeEstimator; the firmware may hold a packet for TXDELAY + 1.5x airtime(255) + 1.5x airtime(len).
+const DefaultTxTimeout = 15 * time.Second
 
 var (
 	ErrTxTimeout = errors.New("kiss: tx done timeout")
-	// Deprecated: never returned; SendData waits for TX_DONE only.
-	ErrTxBusy   = errors.New("kiss: radio busy")
-	ErrTxFailed = errors.New("kiss: tx failed")
+	// Deprecated: HW_ERR_TX_BUSY is ambiguous and does not resolve SendData.
+	ErrTxBusy       = errors.New("kiss: radio busy")
+	ErrTxFailed     = errors.New("kiss: tx failed")
+	ErrTxPending    = errors.New("kiss: previous transmission outcome pending")
+	ErrModemClosed  = errors.New("kiss: modem closed")
+	ErrDisconnected = errors.New("kiss: transport disconnected")
 	// ErrPacketSize is returned by SendData for a payload outside 1..KISS_MAX_PACKET_SIZE bytes.
 	ErrPacketSize = errors.New("kiss: packet must be 1..255 bytes")
 )
@@ -54,6 +58,7 @@ type ModemOption func(*KissModem)
 func WithSignalReport(enabled bool) ModemOption {
 	return func(m *KissModem) {
 		m.signalReport = enabled
+		m.signalRequested = enabled
 	}
 }
 
@@ -91,18 +96,16 @@ func WithTxFlowControl(timeout time.Duration) ModemOption {
 	}
 }
 
-// Deprecated: no effect; the TX timeout is fixed at DefaultTxTimeout.
+// WithTxAirtimeEstimator sizes the TX_DONE wait from the firmware's budget
+// (TXDELAY + 1.5x airtime(255) + 1.5x airtime(len) + 1 s) instead of the
+// fixed WithTxFlowControl timeout. Pass hardware.LoRaAirtimeEstimator.
 func WithTxAirtimeEstimator(estimator func(packetLen int) uint32) ModemOption {
-	return func(m *KissModem) {
-		// no-op: TX timeout is fixed, airtime estimation is for queue scheduling only
-	}
+	return func(m *KissModem) { m.txEstimator = estimator }
 }
 
-// WithHandlerWorkers enables a bounded worker pool for user handler
-// invocation. When n > 0, dispatched frames are forwarded to a job channel
-// of capacity n and consumed by n worker goroutines, isolating slow user
-// handlers from the inbound drain loop. When 0 (default), handlers run
-// inline on the drain goroutine.
+// WithHandlerWorkers runs non-DATA callbacks on n worker goroutines so slow
+// hardware-response handlers do not stall the drain. DATA callbacks always run
+// serially in receive order on the drain, as node handlers require.
 func WithHandlerWorkers(n int) ModemOption {
 	return func(m *KissModem) {
 		if n < 0 {
@@ -132,6 +135,8 @@ type ModemStats struct {
 	RxMetaMisattributed  uint64
 	HandlerSlow          uint64
 	HwDecodeErrors       uint64
+	HwErrors             uint64 // HW_RESP_ERROR frames received
+	TxOutcomeLost        uint64 // TX_DONE waits abandoned by a reconnect
 }
 
 // KissModem represents a KISS TNC modem connection.
@@ -144,8 +149,10 @@ type KissModem struct {
 
 	txFlowControl bool
 	txTimeout     time.Duration
-	txResult      chan error
-	txPending     atomic.Bool
+	txEstimator   func(int) uint32
+	sendMu        sync.Mutex
+	txMu          sync.Mutex
+	txPending     chan error
 
 	inbound        chan *KissFrame
 	flush          chan chan struct{}
@@ -168,6 +175,8 @@ type KissModem struct {
 	statMetaMisattrib atomic.Uint64
 	statSlowHandler   atomic.Uint64
 	statHwDecodeErr   atomic.Uint64
+	statHwError       atomic.Uint64
+	statTxLost        atomic.Uint64
 
 	errMu sync.RWMutex
 	errH  func(error)
@@ -181,10 +190,12 @@ type KissModem struct {
 	dataMu sync.RWMutex
 	dataH  DataFrameHandler
 
-	pendingMu    sync.Mutex
-	pendingFrame *KissFrame
-	pendingTimer *time.Timer
-	pendingSeq   uint64
+	signalMu        sync.Mutex
+	signalRequested bool
+	pendingMu       sync.Mutex
+	pendingFrame    *KissFrame
+	pendingTimer    *time.Timer
+	pendingSeq      uint64
 
 	outboundMu sync.RWMutex
 	outboundH  []func([]byte)
@@ -208,9 +219,6 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 	m.inbound = make(chan *KissFrame, m.inboundSize)
 	m.flush = make(chan chan struct{})
 	m.done = make(chan struct{})
-	if m.txFlowControl {
-		m.txResult = make(chan error, 1)
-	}
 	if m.handlerWorkers > 0 {
 		m.handlerJobs = make(chan *KissFrame, m.handlerWorkers)
 		for i := 0; i < m.handlerWorkers; i++ {
@@ -234,6 +242,8 @@ func (m *KissModem) Stats() ModemStats {
 		RxMetaMisattributed:  m.statMetaMisattrib.Load(),
 		HandlerSlow:          m.statSlowHandler.Load(),
 		HwDecodeErrors:       m.statHwDecodeErr.Load(),
+		HwErrors:             m.statHwError.Load(),
+		TxOutcomeLost:        m.statTxLost.Load(),
 	}
 }
 
@@ -276,18 +286,43 @@ func (m *KissModem) handlerWorker() {
 	}
 }
 
-// Connect opens the transport connection. If signal reporting is enabled,
-// the modem is instructed to send RX metadata after each received packet.
+// Connect opens the transport, abandons any TX_DONE still awaited from the
+// previous connection, and pushes the signal-report setting to the firmware
+// (whose own default is enabled).
 func (m *KissModem) Connect(ctx context.Context) error {
+	if m.closed.Load() {
+		return ErrModemClosed
+	}
 	if err := m.transport.Connect(ctx); err != nil {
 		return err
 	}
-	if m.signalReport {
-		if err := m.SendHardwareCommand(HW_CMD_SET_SIGNAL_REPORT, []byte{0x01}); err != nil {
-			return fmt.Errorf("enable signal report: %w", err)
-		}
+	if m.closed.Load() {
+		_ = m.transport.Close()
+		return ErrModemClosed
+	}
+	m.releaseTx()
+	m.signalMu.Lock()
+	defer m.signalMu.Unlock()
+	val := byte(0)
+	if m.signalRequested {
+		val = 1
+	}
+	if err := m.SendHardwareCommand(HW_CMD_SET_SIGNAL_REPORT, []byte{val}); err != nil {
+		_ = m.transport.Close()
+		return fmt.Errorf("configure signal report: %w", err)
 	}
 	return nil
+}
+
+// releaseTx drops an outstanding TX_DONE wait; after a reconnect the firmware
+// may have rebooted, so the old outcome is unknowable.
+func (m *KissModem) releaseTx() {
+	m.txMu.Lock()
+	defer m.txMu.Unlock()
+	if m.txPending != nil {
+		m.txPending = nil
+		m.statTxLost.Add(1)
+	}
 }
 
 // Close stops dispatch and shuts down the transport.
@@ -303,13 +338,14 @@ func (m *KissModem) Close() error {
 	m.pendingFrame = nil
 	m.pendingMu.Unlock()
 	close(m.done)
+	err := m.transport.Close()
 	if m.handlersActive.Load() == 0 {
 		m.drainWg.Wait()
 		if m.handlerWorkers > 0 {
 			m.handlerWg.Wait()
 		}
 	}
-	return m.transport.Close()
+	return err
 }
 
 // Dead returns a channel that is closed when the underlying transport's read
@@ -352,11 +388,15 @@ func (m *KissModem) AddOutboundHandler(h func([]byte)) {
 	m.outboundMu.Unlock()
 }
 
-// SendData sends a data frame. If TX flow control is enabled, blocks until
-// HW_RESP_TX_DONE is received or the TX timeout expires.
+// SendData serializes transmissions. A timed-out or failed send keeps the
+// TX_DONE slot until the firmware reports, so later sends return ErrTxPending;
+// Connect clears it.
 func (m *KissModem) SendData(data []byte) error {
 	if len(data) == 0 || len(data) > KISS_MAX_PACKET_SIZE {
 		return ErrPacketSize
+	}
+	if m.closed.Load() {
+		return ErrModemClosed
 	}
 	m.outboundMu.RLock()
 	handlers := m.outboundH
@@ -365,59 +405,112 @@ func (m *KissModem) SendData(data []byte) error {
 		h(data)
 	}
 
-	if m.txFlowControl {
-		select {
-		case <-m.txResult:
-		default:
-		}
+	m.sendMu.Lock()
+	defer m.sendMu.Unlock()
+	if m.closed.Load() {
+		return ErrModemClosed
+	}
+	dead := m.transport.Dead()
+	select {
+	case <-dead:
+		return ErrDisconnected
+	default:
 	}
 
-	frame := EncodeFrame(m.kissPort, KISS_CMD_DATA, data)
-	m.txPending.Store(true)
-	if err := m.transport.Send(frame); err != nil {
-		m.txPending.Store(false)
+	var result chan error
+	if m.txFlowControl {
+		m.txMu.Lock()
+		if m.txPending != nil {
+			m.txMu.Unlock()
+			return ErrTxPending
+		}
+		result = make(chan error, 1)
+		m.txPending = result
+		m.txMu.Unlock()
+	}
+	if err := m.transport.Send(EncodeFrame(m.kissPort, KISS_CMD_DATA, data)); err != nil {
+		// A failed write may still have delivered the frame to the firmware.
 		return err
 	}
-
+	if m.closed.Load() {
+		return ErrModemClosed
+	}
 	if !m.txFlowControl {
 		return nil
 	}
 
+	timer := time.NewTimer(m.txWait(len(data)))
+	defer timer.Stop()
 	select {
-	case err := <-m.txResult:
-		m.txPending.Store(false)
+	case err := <-result:
 		return err
-	case <-time.After(m.txTimeout):
-		m.txPending.Store(false)
+	case <-timer.C:
 		return ErrTxTimeout
+	case <-dead:
+		return ErrDisconnected
 	case <-m.done:
-		m.txPending.Store(false)
-		return nil
+		return ErrModemClosed
 	}
+}
+
+// txWait is the firmware's worst-case TX budget when an estimator is set.
+func (m *KissModem) txWait(packetLen int) time.Duration {
+	if m.txEstimator == nil {
+		return m.txTimeout
+	}
+	airtime := time.Duration(m.txEstimator(KISS_MAX_PACKET_SIZE)+m.txEstimator(packetLen)) * time.Millisecond
+	return 500*time.Millisecond + airtime*3/2 + time.Second
+}
+
+func (m *KissModem) completeTx(data []byte) {
+	m.txMu.Lock()
+	defer m.txMu.Unlock()
+	if m.txPending == nil {
+		return
+	}
+	var err error
+	if len(data) < 1 || data[0] != 0x01 {
+		err = ErrTxFailed
+	}
+	m.txPending <- err
+	m.txPending = nil
+}
+
+// SendKissCommand sends a standard KISS command (TXDELAY, PERSISTENCE,
+// SLOTTIME, TXTAIL, FULLDUPLEX; delays in 10 ms units). The firmware silently
+// drops frames over KISS_MAX_FRAME_SIZE unescaped bytes, so those fail here.
+func (m *KissModem) SendKissCommand(cmd byte, data []byte) error {
+	if m.closed.Load() {
+		return ErrModemClosed
+	}
+	if len(data) > KISS_MAX_FRAME_SIZE-1 {
+		return ErrFrameTooLarge
+	}
+	return m.transport.Send(EncodeFrame(m.kissPort, cmd, data))
 }
 
 // SendHardwareCommand sends a hardware sub-command with the given payload.
 func (m *KissModem) SendHardwareCommand(subCmd byte, data []byte) error {
-	frame := EncodeHardwareFrame(m.kissPort, subCmd, data)
-	return m.transport.Send(frame)
+	return m.SendKissCommand(KISS_CMD_SETHARDWARE, append([]byte{subCmd}, data...))
 }
 
-// SetRadio configures the radio parameters.
+// SetRadio configures the radio (CR 5..8). The firmware replies HW_RESP_OK, not
+// HwResp(HW_CMD_SET_RADIO), and does not check that the radio accepted the values.
 func (m *KissModem) SetRadio(config *RadioConfig) error {
 	return m.SendHardwareCommand(HW_CMD_SET_RADIO, config.ToBytes())
 }
 
-// SetTxPower configures the transmit power.
+// SetTxPower sets TX power in dBm. The firmware replies HW_RESP_OK, not HwResp(HW_CMD_SET_TX_POWER).
 func (m *KissModem) SetTxPower(power uint8) error {
 	return m.SendHardwareCommand(HW_CMD_SET_TX_POWER, []byte{power})
 }
 
-// GetRadio requests the current radio configuration.
+// GetRadio requests the radio config. The reply is the firmware's cached SetRadio values, all zero until the host has set them.
 func (m *KissModem) GetRadio() error {
 	return m.SendHardwareCommand(HW_CMD_GET_RADIO, nil)
 }
 
-// GetTxPower requests the current transmit power.
+// GetTxPower requests TX power. The reply is the cached SetTxPower value, zero until set.
 func (m *KissModem) GetTxPower() error {
 	return m.SendHardwareCommand(HW_CMD_GET_TX_POWER, nil)
 }
@@ -430,6 +523,13 @@ func (m *KissModem) GetVersion() error {
 // GetStats requests modem statistics.
 func (m *KissModem) GetStats() error {
 	return m.SendHardwareCommand(HW_CMD_GET_STATS, nil)
+}
+
+// GetMCUTemp requests the MCU temperature. The reply carries an int16 of
+// tenths of a degree Celsius; a board that cannot measure it answers
+// HW_RESP_ERROR / HW_ERR_NO_CALLBACK instead.
+func (m *KissModem) GetMCUTemp() error {
+	return m.SendHardwareCommand(HW_CMD_GET_MCU_TEMP, nil)
 }
 
 // GetBattery requests battery status.
@@ -447,7 +547,7 @@ func (m *KissModem) Ping() error {
 	return m.SendHardwareCommand(HW_CMD_PING, nil)
 }
 
-// Reboot sends a reboot command.
+// Reboot asks the firmware to reboot. It replies HW_RESP_OK, then the connection drops.
 func (m *KissModem) Reboot() error {
 	return m.SendHardwareCommand(HW_CMD_REBOOT, nil)
 }
@@ -467,13 +567,33 @@ func (m *KissModem) IsChannelBusy() error {
 	return m.SendHardwareCommand(HW_CMD_IS_CHANNEL_BUSY, nil)
 }
 
-// SetSignalReport enables or disables signal reporting on the modem.
+// SetSignalReport requests a mode change; firmware's 0x9A reply updates local metadata pairing.
 func (m *KissModem) SetSignalReport(enabled bool) error {
 	val := byte(0x00)
 	if enabled {
 		val = 0x01
 	}
-	return m.SendHardwareCommand(HW_CMD_SET_SIGNAL_REPORT, []byte{val})
+	m.signalMu.Lock()
+	defer m.signalMu.Unlock()
+	if err := m.SendHardwareCommand(HW_CMD_SET_SIGNAL_REPORT, []byte{val}); err != nil {
+		return err
+	}
+	m.signalRequested = enabled
+	return nil
+}
+
+func (m *KissModem) setSignalMode(enabled bool) {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	m.signalReport = enabled
+	if !enabled && m.pendingFrame != nil {
+		if m.pendingTimer != nil {
+			m.pendingTimer.Stop()
+			m.pendingTimer = nil
+		}
+		m.enqueueFrame(m.pendingFrame)
+		m.pendingFrame = nil
+	}
 }
 
 // GetSignalReport requests the signal report setting.
@@ -482,17 +602,36 @@ func (m *KissModem) GetSignalReport() error {
 }
 
 func (m *KissModem) onFrame(frame *KissFrame) {
-	if m.signalReport {
-		m.onFrameWithSignalReport(frame)
+	if m.closed.Load() {
 		return
 	}
-	m.enqueueFrame(frame)
+	if frame.Command == KISS_CMD_SETHARDWARE && len(frame.Data) > 0 {
+		switch frame.Data[0] {
+		case HW_RESP_TX_DONE:
+			m.completeTx(frame.Data[1:])
+		case HW_RESP_ERROR:
+			m.statHwError.Add(1)
+		case HwResp(HW_CMD_GET_SIGNAL_REPORT):
+			if len(frame.Data) == 2 {
+				m.setSignalMode(frame.Data[1] != 0)
+			}
+		}
+	}
+	m.onFrameWithSignalReport(frame)
 }
 
 func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	if m.closed.Load() {
+		return
+	}
+	if !m.signalReport {
+		m.enqueueFrame(frame)
+		return
+	}
 	// HW_RESP_RX_META: enrich the pending data frame and dispatch it.
 	if frame.Command == KISS_CMD_SETHARDWARE && len(frame.Data) >= 1 && frame.Data[0] == HW_RESP_RX_META {
-		m.pendingMu.Lock()
 		pending := m.pendingFrame
 		if pending != nil {
 			if m.pendingTimer != nil {
@@ -501,7 +640,6 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 			}
 			m.pendingFrame = nil
 		}
-		m.pendingMu.Unlock()
 
 		if pending != nil && len(frame.Data) >= 3 {
 			pending.SNR = snrDBFromWire(int8(frame.Data[1]))
@@ -519,14 +657,12 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 			m.statMetaMisattrib.Add(1)
 		}
 
-		// Still dispatch the HW frame to registered hw handlers.
-		m.dispatchHwFrame(frame)
+		m.enqueueFrame(frame)
 		return
 	}
 
 	// Data frame: queue it and wait for RX_META.
 	if frame.Command == KISS_CMD_DATA {
-		m.pendingMu.Lock()
 		stale := m.pendingFrame
 		if stale != nil {
 			if m.pendingTimer != nil {
@@ -542,7 +678,6 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 		m.pendingTimer = time.AfterFunc(rxMetaTimeout, func() {
 			m.flushPending(seq)
 		})
-		m.pendingMu.Unlock()
 
 		// Flush the stale frame that never got its metadata.
 		if stale != nil {
@@ -560,15 +695,13 @@ func (m *KissModem) onFrameWithSignalReport(frame *KissFrame) {
 // been replaced or consumed by a later data frame / meta arrival.
 func (m *KissModem) flushPending(seq uint64) {
 	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
 	if m.pendingSeq != seq || m.pendingFrame == nil {
-		m.pendingMu.Unlock()
 		return
 	}
 	pending := m.pendingFrame
 	m.pendingFrame = nil
 	m.pendingTimer = nil
-	m.pendingMu.Unlock()
-
 	m.statMetaTimeout.Add(1)
 	m.enqueueFrame(pending)
 }
@@ -599,7 +732,7 @@ func (m *KissModem) enqueueFrame(frame *KissFrame) {
 }
 
 func (m *KissModem) dispatchFrame(frame *KissFrame) {
-	if m.handlerWorkers > 0 {
+	if m.handlerWorkers > 0 && frame.Command != KISS_CMD_DATA {
 		select {
 		case m.handlerJobs <- frame:
 		case <-m.done:
@@ -654,19 +787,8 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 		return
 	}
 
-	if subCmd == HW_RESP_TX_DONE && m.txResult != nil && m.txPending.Load() {
-		// TX_DONE carries a result byte: 0x01 = sent, 0x00 = failed (radio busy /
-		// startSendRaw failed / airtime timeout). See firmware KissModem.cpp
-		// processTx(). We target MeshCore 1.16+ as the KISS baseline, where this
-		// byte is always present, so anything other than 0x01 is a failed transmit.
-		res := error(nil)
-		if len(data) < 1 || data[0] != 0x01 {
-			res = ErrTxFailed
-		}
-		select {
-		case m.txResult <- res:
-		default:
-		}
+	if subCmd == HW_RESP_ERROR {
+		m.handleHwError(data)
 	}
 
 	m.hwMu.RLock()
@@ -675,6 +797,15 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 	for _, h := range handlers {
 		h(subCmd, data)
 	}
+}
+
+// HW_ERR_TX_BUSY can mean output backpressure, not rejection of the current TX.
+func (m *KissModem) handleHwError(data []byte) {
+	code := byte(0)
+	if len(data) > 0 {
+		code = data[0]
+	}
+	m.dispatchError(fmt.Errorf("kiss: hardware error: %w", HwErrorFor(code)))
 }
 
 func (m *KissModem) onError(err error) {
