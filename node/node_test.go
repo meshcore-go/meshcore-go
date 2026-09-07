@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"sync"
 	"testing"
@@ -417,5 +418,221 @@ func TestNode_TxStats(t *testing.T) {
 	stats := n.TxStats()
 	if stats.Sent < 1 {
 		t.Errorf("TxStats.Sent = %d, want >= 1", stats.Sent)
+	}
+}
+
+type txCall struct {
+	data     []byte
+	priority uint8
+	delay    time.Duration
+}
+
+// mockTxRadio records enqueued transmissions without sending them.
+type mockTxRadio struct {
+	mockRadio
+	mu    sync.Mutex
+	calls []txCall
+}
+
+func (m *mockTxRadio) Enqueue(data []byte, priority uint8, delay time.Duration) bool {
+	m.mu.Lock()
+	m.calls = append(m.calls, txCall{data: data, priority: priority, delay: delay})
+	m.mu.Unlock()
+	return true
+}
+
+func (m *mockTxRadio) TxQueueLen() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+func (m *mockTxRadio) enqueued() []txCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]txCall, len(m.calls))
+	copy(out, m.calls)
+	return out
+}
+
+var _ TxRadio = (*mockTxRadio)(nil)
+
+func ackRelayBytes() []byte {
+	header := meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAck, 0)
+	return append([]byte{header, 0x00}, 1, 2, 3, 4)
+}
+
+func ackRelayPacket() *meshcore.Packet {
+	return &meshcore.Packet{
+		Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAck, 0),
+		PathLength: 0,
+		Payload:    []byte{1, 2, 3, 4},
+	}
+}
+
+func floodRelayPacket() *meshcore.Packet {
+	return &meshcore.Packet{
+		Header:  meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeTxtMsg, 0),
+		Payload: []byte{0xaa},
+	}
+}
+
+func TestNode_RelayDelayDefaults(t *testing.T) {
+	radio := &mockTxRadio{}
+	n := New(seedIdentity(1), radio)
+	defer n.Stop()
+
+	n.router.forward(floodRelayPacket(), PriorityFloodRelay, n.router.floodDelay, 0)
+	n.router.routeDirectRecvAcks(ackRelayPacket(), 0)
+
+	calls := radio.enqueued()
+	if len(calls) != 2 {
+		t.Fatalf("got %d enqueues, want 2", len(calls))
+	}
+	for i, c := range calls {
+		if c.delay != 0 {
+			t.Errorf("call %d delay = %v, want 0 without an airtime estimator", i, c.delay)
+		}
+	}
+}
+
+func TestNode_FloodRelayDelayUsesAirtimeEstimator(t *testing.T) {
+	radio := &mockTxRadio{}
+	n := New(seedIdentity(1), radio, WithAirtimeEstimator(func(int) uint32 { return 100 }))
+	defer n.Stop()
+
+	maxDelay := 5 * time.Duration(100*52/50/2) * time.Millisecond
+	for range 20 {
+		n.router.forward(floodRelayPacket(), PriorityFloodRelay, n.router.floodDelay, 0)
+	}
+	for i, c := range radio.enqueued() {
+		if c.delay < 0 || c.delay > maxDelay {
+			t.Errorf("call %d delay = %v, want within [0, %v]", i, c.delay, maxDelay)
+		}
+	}
+}
+
+func TestNode_RelayDelayOverrides(t *testing.T) {
+	radio := &mockTxRadio{}
+	var gotLen int
+	var gotAirtime uint32
+	n := New(seedIdentity(1), radio,
+		WithAirtimeEstimator(func(int) uint32 { return 40 }),
+		WithFloodRetransmitDelay(func(packetLen int, estAirtimeMs uint32) time.Duration {
+			gotLen, gotAirtime = packetLen, estAirtimeMs
+			return 700 * time.Millisecond
+		}),
+		WithDirectRetransmitDelay(func(int, uint32) time.Duration { return 250 * time.Millisecond }),
+	)
+	defer n.Stop()
+
+	n.router.forward(floodRelayPacket(), PriorityFloodRelay, n.router.floodDelay, 0)
+	n.router.forward(ackRelayPacket(), PriorityDirectRelay, n.router.directDelay, 0)
+
+	calls := radio.enqueued()
+	if len(calls) != 2 {
+		t.Fatalf("got %d enqueues, want 2", len(calls))
+	}
+	if calls[0].delay != 700*time.Millisecond {
+		t.Errorf("flood delay = %v, want 700ms", calls[0].delay)
+	}
+	if calls[1].delay != 250*time.Millisecond {
+		t.Errorf("direct delay = %v, want 250ms", calls[1].delay)
+	}
+	if gotLen != 3 || gotAirtime != 40 {
+		t.Errorf("flood hook got (len=%d, airtime=%d), want (3, 40)", gotLen, gotAirtime)
+	}
+}
+
+// Firmware routeDirectRecvAcks sends the multipart copies first, plain ACK last.
+func TestNode_ExtraAckTransmitCount(t *testing.T) {
+	radio := &mockTxRadio{}
+	n := New(seedIdentity(1), radio,
+		WithDirectRetransmitDelay(func(int, uint32) time.Duration { return 100 * time.Millisecond }),
+		WithExtraAckTransmitCount(func() uint8 { return 2 }),
+	)
+	defer n.Stop()
+
+	n.router.routeDirectRecvAcks(ackRelayPacket(), 0)
+
+	calls := radio.enqueued()
+	want := []struct {
+		delay     time.Duration
+		remaining uint8
+		payload   byte
+	}{
+		{400 * time.Millisecond, 2, meshcore.PayloadTypeMultiPart},
+		{800 * time.Millisecond, 1, meshcore.PayloadTypeMultiPart},
+		{800 * time.Millisecond, 0, meshcore.PayloadTypeAck},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("got %d enqueues, want %d", len(calls), len(want))
+	}
+	for i, w := range want {
+		pkt, err := meshcore.PacketFromBytes(calls[i].data)
+		if err != nil {
+			t.Fatalf("copy %d: %v", i, err)
+		}
+		if calls[i].delay != w.delay {
+			t.Errorf("copy %d delay = %v, want %v", i, calls[i].delay, w.delay)
+		}
+		if calls[i].priority != PriorityDirectRelay {
+			t.Errorf("copy %d priority = %d, want %d", i, calls[i].priority, PriorityDirectRelay)
+		}
+		if pkt.PayloadType() != w.payload {
+			t.Fatalf("copy %d payload type = %d, want %d", i, pkt.PayloadType(), w.payload)
+		}
+		if w.payload == meshcore.PayloadTypeAck {
+			if !bytes.Equal(pkt.Payload, []byte{1, 2, 3, 4}) {
+				t.Errorf("plain ACK payload = %x, want 01020304", pkt.Payload)
+			}
+			continue
+		}
+		mp, err := meshcore.MultiPartFromBytes(pkt.Payload)
+		if err != nil {
+			t.Fatalf("copy %d multipart: %v", i, err)
+		}
+		if mp.Remaining != w.remaining || mp.WrappedType != meshcore.PayloadTypeAck {
+			t.Errorf("copy %d = remaining %d type %d, want %d / %d", i, mp.Remaining, mp.WrappedType, w.remaining, meshcore.PayloadTypeAck)
+		}
+		if !bytes.Equal(mp.WrappedPayload, []byte{1, 2, 3, 4}) {
+			t.Errorf("copy %d wrapped payload = %x, want 01020304", i, mp.WrappedPayload)
+		}
+	}
+}
+
+// Each copy must hash differently or a relay's dedup collapses them.
+func TestNode_ExtraAckCopiesHashDistinctly(t *testing.T) {
+	radio := &mockTxRadio{}
+	n := New(seedIdentity(1), radio, WithExtraAckTransmitCount(func() uint8 { return 2 }))
+	defer n.Stop()
+
+	n.router.routeDirectRecvAcks(ackRelayPacket(), 0)
+
+	seen := map[[meshcore.PacketHashSize]byte]bool{}
+	for i, c := range radio.enqueued() {
+		pkt, err := meshcore.PacketFromBytes(c.data)
+		if err != nil {
+			t.Fatalf("copy %d: %v", i, err)
+		}
+		h := pkt.PacketHash()
+		if seen[h] {
+			t.Fatalf("copy %d repeats packet hash %x", i, h)
+		}
+		seen[h] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("got %d distinct hashes, want 3", len(seen))
+	}
+}
+
+func TestNode_ExtraAckTransmitCountUnset(t *testing.T) {
+	radio := &mockTxRadio{}
+	n := New(seedIdentity(1), radio)
+	defer n.Stop()
+
+	n.router.routeDirectRecvAcks(ackRelayPacket(), 0)
+	if got := len(radio.enqueued()); got != 1 {
+		t.Fatalf("got %d enqueues, want 1", got)
 	}
 }
