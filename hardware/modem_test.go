@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -121,8 +122,8 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 	// SNR byte -6 is quarter-dB on the wire, decoded to -1.5 dB.
 	mt.injectFrame(makeRxMetaFrame(-6, -80))
 	modem.Flush()
-	if len(received) != 1 {
-		t.Fatalf("expected 1 dispatched frame after meta, got %d", len(received))
+	if len(received) != 2 {
+		t.Fatalf("expected DATA and RX_META, got %d frames", len(received))
 	}
 	if received[0].SNR != -1.5 {
 		t.Errorf("SNR = %g, want -1.5", received[0].SNR)
@@ -184,8 +185,8 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 	mu.Lock()
 	count = len(received)
 	mu.Unlock()
-	if count != 2 {
-		t.Fatalf("expected 2 total frames, got %d", count)
+	if count != 3 {
+		t.Fatalf("expected 2 DATA frames and RX_META, got %d", count)
 	}
 
 	mu.Lock()
@@ -261,6 +262,7 @@ func TestModem_SignalReportEnabled_MetaWithoutPending(t *testing.T) {
 	// Inject RX_META with no pending data frame — should not crash,
 	// and the HW frame should still be dispatched to frame handler.
 	mt.injectFrame(makeRxMetaFrame(-10, -90))
+	modem.Flush()
 
 	// The HW frame itself goes through dispatchFrame → frameHandler.
 	// But no data frame should be dispatched with enrichment.
@@ -330,18 +332,23 @@ func TestModem_ConnectSendsSignalReport(t *testing.T) {
 	}
 }
 
-func TestModem_ConnectDoesNotSendSignalReport_WhenDisabled(t *testing.T) {
+// Firmware defaults signal report on, so a modem that does not want RX_META
+// must say so on every connect.
+func TestModem_ConnectSendsSignalReportOff_WhenDisabled(t *testing.T) {
 	mt := newMockTransport()
 	modem := NewKissModem(mt) // no WithSignalReport
 
-	ctx := context.Background()
-	if err := modem.Connect(ctx); err != nil {
+	if err := modem.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect error: %v", err)
 	}
 
 	sent := mt.sentFrames()
-	if len(sent) != 0 {
-		t.Fatalf("expected no sent frames on connect when signal report disabled, got %d", len(sent))
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 sent frame on connect, got %d", len(sent))
+	}
+	frame, _ := DecodeFrame(sent[0])
+	if frame.Data[0] != HW_CMD_SET_SIGNAL_REPORT || frame.Data[1] != 0x00 {
+		t.Errorf("frame: subcmd=0x%02X val=0x%02X, want 0x19/0x00", frame.Data[0], frame.Data[1])
 	}
 }
 
@@ -552,8 +559,8 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(received) != 3 {
-		t.Fatalf("expected 3 frames, got %d", len(received))
+	if len(received) != 4 {
+		t.Fatalf("expected 3 DATA frames and RX_META, got %d", len(received))
 	}
 
 	// First two: stale, zero SNR/RSSI
@@ -735,7 +742,7 @@ func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissF
 	go func() { errCh <- m.SendData([]byte{0x01}) }()
 
 	deadline := time.Now().Add(time.Second)
-	for !m.txPending.Load() {
+	for len(mt.sentFrames()) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("SendData never marked TX pending")
 		}
@@ -786,6 +793,44 @@ func TestModem_TxFlowControl_DoneMissingByte(t *testing.T) {
 	}
 }
 
+func TestModem_HwError_TxBusyDoesNotResolveSend(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt, WithTxFlowControl(20*time.Millisecond))
+	defer m.Close()
+	frame := &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_ERROR, HW_ERR_TX_BUSY}}
+	if err := sendAndAwait(t, m, mt, frame); !errors.Is(err, ErrTxTimeout) {
+		t.Errorf("SendData on ambiguous HW_ERR_TX_BUSY = %v, want ErrTxTimeout", err)
+	}
+}
+
+// Any other error code is reported to the error handler (it belongs to a
+// command reply, not to a transmit) and counted.
+func TestModem_HwError_Reported(t *testing.T) {
+	mt := newMockTransport()
+	m := NewKissModem(mt)
+	got := make(chan error, 1)
+	m.SetErrorHandler(func(err error) {
+		select {
+		case got <- err:
+		default:
+		}
+	})
+	m.onFrame(&KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: []byte{HW_RESP_ERROR, HW_ERR_NO_CALLBACK}})
+
+	select {
+	case err := <-got:
+		if !strings.Contains(err.Error(), "not supported by this board") {
+			t.Errorf("error = %v, want it to name the HW_ERR_NO_CALLBACK cause", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hardware error was not reported")
+	}
+	if n := m.Stats().HwErrors; n != 1 {
+		t.Errorf("HwErrors = %d, want 1", n)
+	}
+}
+
+// Output backpressure may precede a successful TX_DONE for the accepted frame.
 func TestModem_TxFlowControl_Busy(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))

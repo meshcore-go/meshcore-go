@@ -8,6 +8,7 @@ import (
 	"time"
 
 	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/meshcore-go/meshcore-go/hardware"
 )
 
 func fixedEstimator(ms uint32) AirtimeEstimator {
@@ -355,5 +356,27 @@ func TestTxEngine_Stats_QueueRejected(t *testing.T) {
 	stats := e.stats()
 	if stats.QueueRejected != 1 {
 		t.Errorf("stats.QueueRejected = %d, want 1", stats.QueueRejected)
+	}
+}
+
+func TestTxEngine_RequeuesOnTxPending(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+
+	var calls atomic.Int32
+	tx := newTxEngine(func([]byte) error {
+		if calls.Add(1) == 1 {
+			return hardware.ErrTxPending
+		}
+		return nil
+	}, done, withTxAirtimeBudget(newAirtimeBudget(1.0, time.Hour, fixedEstimator(10))), withTxMaxQueue(8))
+
+	tx.enqueue([]byte{0x01}, 0, 0)
+	deadline := time.Now().Add(2 * time.Second)
+	for tx.stats().Sent == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s := tx.stats(); s.Sent != 1 || s.BusyRequeued != 1 || s.Failed != 0 {
+		t.Fatalf("stats = %+v, want one requeue then one send", s)
 	}
 }

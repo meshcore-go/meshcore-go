@@ -214,7 +214,15 @@ Both modules provide `SerialTransport` (via `go.bug.st/serial`) and `TCPTranspor
 
 Inbound frames are buffered (1024 by default, `WithInboundBuffer`); when full, the oldest is dropped with a warning so the read loop never blocks. Corrupted streams resync at the next frame boundary.
 
-TX flow control is on by default with a fixed 5-second timeout. `SendData` rejects empty or over-255-byte packets up front, then waits for `HW_RESP_TX_DONE`; a result byte other than success returns `ErrTxFailed`, and no reply returns `ErrTxTimeout`. Hardware error frames seen mid-send are ignored, because firmware 1.17 also raises `HW_ERR_TX_BUSY` for host-output backpressure. `ErrTxBusy` remains exported but is no longer returned.
+TX flow control is on by default. `SendData` serializes transmissions and rejects empty or over-255-byte packets, then waits for `HW_RESP_TX_DONE`; a result byte other than success returns `ErrTxFailed`. The wait is 15 seconds (`WithTxFlowControl`) or, with `WithTxAirtimeEstimator`, the firmware's own worst-case budget: TXDELAY plus 1.5× the airtime of a 255-byte packet plus 1.5× the packet's airtime plus a second. Pass the same `LoRaAirtimeEstimator` you give the node. Completion processing happens before user callbacks and cannot be lost through inbound queue overflow. Hardware errors are counted and reported, but do not resolve a transmission: firmware also raises `HW_ERR_TX_BUSY` for host-output backpressure. `ErrTxBusy` remains exported for compatibility but is not returned.
+
+A timeout returns `ErrTxTimeout` without cancelling the firmware transmission, and a failed write may still have reached the firmware. Until the late `TX_DONE` arrives, further sends return `ErrTxPending` without writing; the node TX engine re-queues those with a short backoff by default. `Connect` abandons the outstanding wait (counted in `ModemStats.TxOutcomeLost`), because a reconnect may have rebooted the firmware. `WithTxFlowControl(0)` disables completion tracking and leaves scheduling to the caller. Closing an interrupted send returns `ErrModemClosed`; a lost connection returns `ErrDisconnected`, never confirmed success.
+
+Firmware enables RX metadata by default, so `Connect` always pushes the modem's own setting (`WithSignalReport`, default off). `SetSignalReport` requests a runtime change; firmware's `0x9A` confirmation updates local metadata pairing. Disabling flushes held data without metadata. RX metadata reaches both general and hardware callbacks after internal pairing. DATA callbacks always run serially in receive order; `WithHandlerWorkers` parallelizes non-DATA callbacks only. Slow DATA callbacks can still cause inbound drops, but cannot block internal TX completion. `Close` is terminal for a modem instance; reconnect the transport using a live modem or create a new instance after closing it.
+
+`SendKissCommand` sends the standard KISS parameters (TXDELAY, PERSISTENCE, SLOTTIME, TXTAIL, FULLDUPLEX). The firmware defaults to a 500 ms TXDELAY and p-persistent CSMA with P=63 and 100 ms slots underneath the node's own scheduling. Commands longer than the firmware's 512-byte receive buffer return `ErrFrameTooLarge` instead of being silently dropped. `SetRadio`, `SetTxPower` and `Reboot` are answered with `HW_RESP_OK`, not the `cmd|0x80` code, and `GetRadio`/`GetTxPower` return the firmware's cached values, which are zero until the host sets them.
+
+The codec escapes type bytes as well as payload. Transport buffering allows up to 1,030 encoded bytes, separately from decoded frame bounds, so large escaped hardware responses survive fragmented reads. `LoRaAirtimeEstimator` uses the firmware preamble: 32 symbols at SF5–8 and 16 at higher spreading factors.
 
 ### Node runtime (`node`)
 
@@ -227,6 +235,10 @@ TX flow control is on by default with a fixed 5-second timeout. `SendData` rejec
 | `RegionMap` | Flood scopes and transport-key lookup |
 
 Routing follows the firmware: only ACK, PATH, REQ, RESPONSE, TXT_MSG, ANON_REQ, GRP_TXT, GRP_DATA and verified ADVERT packets are re-flooded, and a direct packet with hops remaining is relayed but not delivered locally. Forwarding is opt-in through `WithAllowForwardHandler`.
+
+A `RadioMux` remembers every packet it transmits, as firmware's markSeen-on-send does for a device. A copy that a neighbour bounces back is still delivered to each virtual radio but arrives flagged do-not-retransmit, so a repeater Node never re-floods a packet that its companion Node on the same radio originated.
+
+For airtime-aware operation through a `RadioMux`, pass the same estimator to both `WithMuxAirtimeEstimator` (the shared TX budget) and `WithAirtimeEstimator` on each node (RX and relay timing). Configuring the mux alone does not configure node timing.
 
 #### Handler contract
 

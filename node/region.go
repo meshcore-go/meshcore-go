@@ -23,11 +23,22 @@ func NewRegionMap() *RegionMap {
 	}
 }
 
+// Wildcard returns a copy of the wildcard region; use IsWildcard to test one for identity.
 func (rm *RegionMap) Wildcard() *meshcore.Region {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	w := rm.wildcard
 	return &w
+}
+
+// IsWildcard reports whether r is the wildcard region, compared by name.
+func (rm *RegionMap) IsWildcard(r *meshcore.Region) bool {
+	if r == nil {
+		return false
+	}
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return r.Name == rm.wildcard.Name
 }
 
 func (rm *RegionMap) SetWildcardFlags(flags uint8) {

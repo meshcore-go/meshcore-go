@@ -18,7 +18,15 @@ type Packet struct {
 	SNR           float32 // Real decibels. See SNRFromWire for the wire format.
 	RSSI          int8
 	HasSignalInfo bool
+
+	noRetransmit bool
 }
+
+// MarkDoNotRetransmit flags this packet as consumed by this node, suppressing relay.
+func (p *Packet) MarkDoNotRetransmit() { p.noRetransmit = true }
+
+// IsMarkedDoNotRetransmit reports whether MarkDoNotRetransmit was called on this packet.
+func (p *Packet) IsMarkedDoNotRetransmit() bool { return p.noRetransmit }
 
 // SNRFromWire converts an on-wire SNR byte to real decibels.
 //
@@ -266,7 +274,8 @@ func (p *Packet) AppendPathHash(hash []byte) bool {
 	if newCount*int(hashSize) > MaxPathSize {
 		return false
 	}
-	p.Path = append(p.Path, hash[:hashSize]...)
+	// Path may alias the payload when parsed from a buffer; never grow in place.
+	p.Path = append(p.Path[:len(p.Path):len(p.Path)], hash[:hashSize]...)
 	p.PathLength = (hashSize-1)<<6 | uint8(newCount)
 	return true
 }

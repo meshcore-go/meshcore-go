@@ -38,6 +38,19 @@ func (d *DedupCache) hasSeenHash(pkt *Packet) bool {
 	return false
 }
 
+// Contains reports whether the packet is recorded, without recording it.
+func (d *DedupCache) Contains(pkt *Packet) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	h := pkt.PacketHash()
+	for i := range d.hashes {
+		if d.hashes[i] == h {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkSeen records a packet as seen without checking. Used for self-originated
 // packets to prevent relaying our own transmissions back.
 func (d *DedupCache) MarkSeen(pkt *Packet) {

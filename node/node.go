@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -14,6 +15,20 @@ const DefaultAdvertInterval = 60 * time.Minute
 var ErrTxQueueFull = errors.New("transmit queue full")
 
 type PacketHandler func(pkt *meshcore.Packet)
+
+// RetransmitDelayFunc returns the delay to apply before relaying a packet of
+// packetLen serialised bytes with the given estimated airtime.
+type RetransmitDelayFunc func(packetLen int, estAirtimeMs uint32) time.Duration
+
+// RxDelayFunc returns how long to hold a received flood packet before routing it.
+// Compose hardware.PacketScore with RxDelayForScore to match the firmware.
+type RxDelayFunc func(pkt *meshcore.Packet, packetLen int, estAirtimeMs uint32) time.Duration
+
+// RxDelayForScore is the firmware's Dispatcher::calcRxDelay. score comes from the
+// radio; a stronger packet scores higher and waits less.
+func RxDelayForScore(score float64, estAirtimeMs uint32) time.Duration {
+	return time.Duration((math.Pow(10, 0.85-score)-1)*float64(estAirtimeMs)) * time.Millisecond
+}
 
 // Transmit priority levels matching MeshCore C++. Lower = higher priority.
 const (
@@ -36,6 +51,12 @@ type Node struct {
 	regions    *RegionMap
 	log        *slog.Logger
 	txCfg      nodeTxConfig
+
+	floodDelay  RetransmitDelayFunc
+	directDelay RetransmitDelayFunc
+	rxDelay     RxDelayFunc
+	inbound     chan *meshcore.Packet
+	extraAcks   func() uint8
 
 	advertData     *meshcore.AdvertAppData
 	advertInterval time.Duration
@@ -65,6 +86,10 @@ type nodeConfig struct {
 	maxChannels      int
 	regions          []*meshcore.Region
 	tx               nodeTxConfig
+	floodDelay       RetransmitDelayFunc
+	directDelay      RetransmitDelayFunc
+	rxDelay          RxDelayFunc
+	extraAcks        func() uint8
 }
 
 // Option configures a Node.
@@ -141,6 +166,7 @@ func WithRegions(regions ...*meshcore.Region) Option {
 	}
 }
 
+// WithAirtimeEstimator supplies node timing; a RadioMux needs its own estimator for TX budgeting.
 func WithAirtimeEstimator(est AirtimeEstimator) Option {
 	return func(c *nodeConfig) {
 		c.tx.airtimeEstimator = est
@@ -162,6 +188,42 @@ func WithDutyCycleWindow(d time.Duration) Option {
 func WithMaxTxQueue(size int) Option {
 	return func(c *nodeConfig) {
 		c.tx.maxTxQueue = size
+	}
+}
+
+// WithFloodRetransmitDelay overrides the delay applied before a flood relay is
+// transmitted. Unset, the delay is FloodRetransmitDelay of the estimated airtime.
+func WithFloodRetransmitDelay(f RetransmitDelayFunc) Option {
+	return func(c *nodeConfig) {
+		c.floodDelay = f
+	}
+}
+
+// WithDirectRetransmitDelay overrides the delay applied before a direct relay is
+// transmitted. Unset, the delay is zero.
+func WithDirectRetransmitDelay(f RetransmitDelayFunc) Option {
+	return func(c *nodeConfig) {
+		c.directDelay = f
+	}
+}
+
+// WithRxDelay sets how long a received flood packet is held before it is routed,
+// matching the firmware's rxdelay. Delays below 50ms route immediately and any
+// delay is capped at 32s; direct packets are never held. Setting it moves packet
+// dispatch off the radio's read goroutine onto a single inbound goroutine, so
+// handlers still never run concurrently.
+func WithRxDelay(f RxDelayFunc) Option {
+	return func(c *nodeConfig) {
+		c.rxDelay = f
+	}
+}
+
+// WithExtraAckTransmitCount sets how many multipart copies of a relayed direct ACK
+// precede the plain one, each direct-retransmit-delay plus 300ms after the last.
+// Unset, only the plain ACK is relayed.
+func WithExtraAckTransmitCount(f func() uint8) Option {
+	return func(c *nodeConfig) {
+		c.extraAcks = f
 	}
 }
 
@@ -188,6 +250,12 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	if cfg.log == nil {
 		cfg.log = slog.Default()
 	}
+	if cfg.floodDelay == nil {
+		cfg.floodDelay = func(_ int, estAirtimeMs uint32) time.Duration { return FloodRetransmitDelay(estAirtimeMs) }
+	}
+	if cfg.directDelay == nil {
+		cfg.directDelay = func(int, uint32) time.Duration { return 0 }
+	}
 
 	n := &Node{
 		identity:       identity,
@@ -201,6 +269,10 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 		advertData:     cfg.advertData,
 		advertInterval: cfg.advertInterval,
 		errH:           cfg.errH,
+		floodDelay:     cfg.floodDelay,
+		directDelay:    cfg.directDelay,
+		rxDelay:        cfg.rxDelay,
+		extraAcks:      cfg.extraAcks,
 		allowForward:   cfg.allowForward,
 		allowPacket:    cfg.allowPacket,
 		handlers:       make(map[byte][]PacketHandler),
@@ -229,27 +301,21 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 		}
 		txRadio = NewQueuedRadio(radio, n.done, queuedOpts...)
 		n.radio = txRadio
-	} else if n.txCfg.airtimeEstimator != nil {
-		n.log.Warn("WithAirtimeEstimator ignored: radio already implements TxRadio; configure airtime on the RadioMux or TxRadio directly")
 	}
 	n.txRadio = txRadio
 
-	airtimeEstimator := n.txCfg.airtimeEstimator
-	n.router.send = func(data []byte, priority uint8) error {
-		delay := time.Duration(0)
-		if airtimeEstimator != nil {
-			delay = FloodRetransmitDelay(airtimeEstimator(len(data)))
-		}
+	n.router.send = func(data []byte, priority uint8, delay time.Duration) error {
 		if !n.txRadio.Enqueue(data, priority, delay) {
 			return ErrTxQueueFull
 		}
 		return nil
 	}
-	n.router.sendDirect = func(data []byte) error {
-		if !n.txRadio.Enqueue(data, PriorityDirectRelay, 0) {
-			return ErrTxQueueFull
-		}
-		return nil
+	n.router.floodDelay = func(l int) time.Duration { return n.floodDelay(l, n.estAirtime(l)) }
+	n.router.directDelay = func(l int) time.Duration { return n.directDelay(l, n.estAirtime(l)) }
+
+	if n.rxDelay != nil {
+		n.inbound = make(chan *meshcore.Packet, inboundQueueSize)
+		go n.runInbound()
 	}
 
 	n.acks = newACKTracker(n.done)
@@ -261,6 +327,14 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	}
 
 	return n
+}
+
+// estAirtime returns the estimated airtime in ms, or 0 without an airtime estimator.
+func (n *Node) estAirtime(packetLen int) uint32 {
+	if n.txCfg.airtimeEstimator == nil {
+		return 0
+	}
+	return n.txCfg.airtimeEstimator(packetLen)
 }
 
 func (n *Node) Identity() meshcore.LocalIdentity {

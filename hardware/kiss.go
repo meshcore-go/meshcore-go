@@ -14,8 +14,10 @@ const (
 	KISS_TFESC = 0xDD // Transposed Frame Escape
 
 	// KISS Frame Limits
-	KISS_MAX_FRAME_SIZE  = 512
-	KISS_MAX_PACKET_SIZE = 255
+	KISS_MAX_FRAME_SIZE         = 512
+	KISS_MAX_PACKET_SIZE        = 255
+	KISS_MAX_DECODED_FRAME_SIZE = KISS_MAX_FRAME_SIZE + 2
+	KISS_MAX_ENCODED_FRAME_SIZE = 2*KISS_MAX_DECODED_FRAME_SIZE + 2
 
 	// KISS Command Masks
 	KISS_MASK_PORT = 0xF0
@@ -85,6 +87,7 @@ const (
 
 var (
 	ErrFrameTooShort    = errors.New("kiss: frame too short")
+	ErrFrameTooLarge    = errors.New("kiss: frame too large")
 	ErrFrameNoFEND      = errors.New("kiss: frame missing FEND markers")
 	ErrInvalidEscape    = errors.New("kiss: invalid escape sequence")
 	ErrIncompleteEscape = errors.New("kiss: incomplete escape sequence at end of data")
@@ -101,10 +104,7 @@ type KissFrame struct {
 	HasSignalInfo bool
 }
 
-// snrDBFromWire converts an on-wire SNR byte to real decibels. MeshCore
-// firmware encodes SNR in quarter-dB units — it sends (int8)round(snr_dB * 4)
-// (see kiss_modem/main.cpp: snr = getLastSNR()*4). Dividing by 4 recovers real
-// dB with exact 0.25 dB resolution.
+// snrDBFromWire decodes the firmware's signed int8(snr_dB * 4) quarter-dB value.
 func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
 
 // RadioConfig holds the radio configuration parameters.
@@ -208,15 +208,16 @@ func UnescapeData(data []byte) ([]byte, error) {
 	return unescaped, nil
 }
 
-// EncodeFrame builds a complete KISS frame: FEND, command byte, escaped data, FEND.
-// The command byte encodes the port (high nibble) and command (low nibble).
+// EncodeFrame builds FEND, escaped type byte and payload, FEND.
 func EncodeFrame(port int, command byte, data []byte) []byte {
 	cmdByte := byte(port<<4) | (command & KISS_MASK_CMD)
-	escaped := EscapeData(data)
+	body := make([]byte, 1, len(data)+1)
+	body[0] = cmdByte
+	body = append(body, data...)
+	escaped := EscapeData(body)
 
-	frame := make([]byte, 0, len(escaped)+3)
+	frame := make([]byte, 0, len(escaped)+2)
 	frame = append(frame, KISS_FEND)
-	frame = append(frame, cmdByte)
 	frame = append(frame, escaped...)
 	frame = append(frame, KISS_FEND)
 	return frame
@@ -247,15 +248,20 @@ func DecodeFrame(raw []byte) (*KissFrame, error) {
 		return nil, ErrFrameTooShort
 	}
 
-	cmdByte := raw[start]
-	port := int((cmdByte & KISS_MASK_PORT) >> 4)
-	command := cmdByte & KISS_MASK_CMD
-
-	payload := raw[start+1 : end]
-	data, err := UnescapeData(payload)
+	if end-start > 2*KISS_MAX_DECODED_FRAME_SIZE {
+		return nil, ErrFrameTooLarge
+	}
+	body, err := UnescapeData(raw[start:end])
 	if err != nil {
 		return nil, fmt.Errorf("kiss: decode frame: %w", err)
 	}
+	if len(body) > KISS_MAX_DECODED_FRAME_SIZE {
+		return nil, ErrFrameTooLarge
+	}
+	cmdByte := body[0]
+	port := int((cmdByte & KISS_MASK_PORT) >> 4)
+	command := cmdByte & KISS_MASK_CMD
+	data := body[1:]
 
 	return &KissFrame{
 		Port:    port,
@@ -318,4 +324,23 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 	}
 
 	return frames, stream[len(stream)-1:], errs
+}
+
+// hwErrors names the modem's HW_ERR_* codes; HwErrorFor turns one into an
+// error so a rejected command reports why instead of timing out silently.
+var hwErrors = map[byte]error{
+	HW_ERR_INVALID_LENGTH: errors.New("invalid length"),
+	HW_ERR_INVALID_PARAM:  errors.New("invalid parameter"),
+	HW_ERR_NO_CALLBACK:    errors.New("not supported by this board"),
+	HW_ERR_MAC_FAILED:     errors.New("MAC verification failed"),
+	HW_ERR_UNKNOWN_CMD:    errors.New("unknown command"),
+	HW_ERR_ENCRYPT_FAILED: errors.New("encrypt failed"),
+	HW_ERR_TX_BUSY:        errors.New("tx busy"),
+}
+
+func HwErrorFor(code byte) error {
+	if err, ok := hwErrors[code]; ok {
+		return err
+	}
+	return fmt.Errorf("unknown error code 0x%02X", code)
 }

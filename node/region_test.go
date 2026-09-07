@@ -395,3 +395,21 @@ func TestNode_WithRegionsOverflow(t *testing.T) {
 		t.Errorf("Regions().Len() = %d, want %d", n.Regions().Len(), meshcore.MaxRegions)
 	}
 }
+
+func TestRegionMap_IsWildcard(t *testing.T) {
+	rm := NewRegionMap()
+
+	if !rm.IsWildcard(rm.Wildcard()) {
+		t.Error("IsWildcard(Wildcard()) = false, want true")
+	}
+	w := *rm.Wildcard()
+	if !rm.IsWildcard(&w) {
+		t.Error("IsWildcard(copy) = false, want true")
+	}
+	if rm.IsWildcard(&meshcore.Region{Name: "eu"}) {
+		t.Error("IsWildcard(normal region) = true, want false")
+	}
+	if rm.IsWildcard(nil) {
+		t.Error("IsWildcard(nil) = true, want false")
+	}
+}

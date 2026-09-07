@@ -1,10 +1,13 @@
 package node
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/meshcore-go/meshcore-go/hardware"
 )
 
 const queuedRadioTickInterval = 50 * time.Millisecond
@@ -85,6 +88,10 @@ func newTxEngine(sendFn func([]byte) error, done chan struct{}, opts ...txEngine
 	}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.retryable == nil {
+		// The modem still awaits the previous TX_DONE; the packet was never written.
+		cfg.retryable = func(err error) bool { return errors.Is(err, hardware.ErrTxPending) }
 	}
 	e := &txEngine{
 		queue:     newTxQueue(cfg.maxQueue),
