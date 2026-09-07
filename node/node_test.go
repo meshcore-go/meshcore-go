@@ -152,7 +152,6 @@ func TestNode_SendPacket(t *testing.T) {
 		t.Fatalf("SendPacket error: %v", err)
 	}
 
-	// Send goes through QueuedRadio queue
 	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
@@ -225,7 +224,6 @@ func TestNode_DataCopied(t *testing.T) {
 	data := makeFloodPacket(meshcore.PayloadTypeAdvert, []byte{0xAA, 0xBB})
 	radio.inject(data)
 
-	// Mutate original after dispatch.
 	data[len(data)-1] = 0x00
 
 	if len(receivedPayload) < 1 {
@@ -361,7 +359,6 @@ func TestNode_SendPacketDelayed(t *testing.T) {
 		t.Fatalf("SendPacketDelayed error: %v", err)
 	}
 
-	// Wait for tx engine to drain
 	time.Sleep(100 * time.Millisecond)
 
 	sent := radio.sentData()
@@ -383,7 +380,6 @@ func TestNode_SendPacketDelayed_MarksSeen(t *testing.T) {
 
 	_ = n.SendPacketDelayed(pkt, PrioritySend, 0)
 
-	// Inject same packet from radio — should be deduped
 	data, _ := pkt.ToBytes()
 	radio.inject(data)
 	time.Sleep(100 * time.Millisecond)
@@ -544,7 +540,6 @@ func TestNode_RelayDelayOverrides(t *testing.T) {
 	}
 }
 
-// Firmware routeDirectRecvAcks sends the multipart copies first, plain ACK last.
 func TestNode_ExtraAckTransmitCount(t *testing.T) {
 	radio := &mockTxRadio{}
 	n := New(seedIdentity(1), radio,

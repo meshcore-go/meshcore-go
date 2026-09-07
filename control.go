@@ -83,7 +83,7 @@ func (c *Control) DiscoverRequest() (*DiscoverRequest, error) {
 
 type DiscoverResponse struct {
 	NodeType byte
-	SNR      float32 // Real decibels. Firmware sends packet->_snr (quarter-dB, ×4).
+	SNR      float32 // real dB; wire form is quarter-dB
 	Tag      uint32
 	PubKey   []byte
 }

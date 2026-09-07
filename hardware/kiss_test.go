@@ -433,8 +433,6 @@ func TestEncodeHardwareFrame(t *testing.T) {
 	data := []byte{0xAA, 0xBB}
 	got := EncodeHardwareFrame(0, HW_CMD_GET_RANDOM, data)
 
-	// Should be: FEND, 0x06 (SETHARDWARE), subcmd, data..., FEND
-	// The subcmd and data get escaped inside the frame payload
 	frame, err := DecodeFrame(got)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -442,7 +440,6 @@ func TestEncodeHardwareFrame(t *testing.T) {
 	if frame.Command != KISS_CMD_SETHARDWARE {
 		t.Errorf("command = 0x%02X, want 0x%02X", frame.Command, KISS_CMD_SETHARDWARE)
 	}
-	// frame.Data should be [subcmd, 0xAA, 0xBB]
 	if len(frame.Data) != 3 {
 		t.Fatalf("data len = %d, want 3", len(frame.Data))
 	}
@@ -455,7 +452,6 @@ func TestEncodeHardwareFrame(t *testing.T) {
 }
 
 func TestDecodeHardwareFrame(t *testing.T) {
-	// Build a hardware frame, decode it, then extract sub-command
 	original := []byte{0x01, 0x02, 0x03}
 	raw := EncodeHardwareFrame(0, HW_CMD_HASH, original)
 	frame, err := DecodeFrame(raw)
@@ -492,7 +488,6 @@ func TestDecodeHardwareFrame_Empty(t *testing.T) {
 }
 
 func TestEncodeHardwareFrame_WithSpecialBytes(t *testing.T) {
-	// Data containing FEND and FESC bytes should survive round-trip
 	original := []byte{KISS_FEND, KISS_FESC, 0x42}
 	raw := EncodeHardwareFrame(0, HW_CMD_ENCRYPT_DATA, original)
 	frame, err := DecodeFrame(raw)

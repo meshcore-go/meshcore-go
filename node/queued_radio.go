@@ -8,8 +8,6 @@ import (
 )
 
 // QueuedRadio wraps a plain Radio with a serializing transmit queue.
-// All sends are funneled through a single goroutine, preventing
-// concurrent writes to the underlying radio.
 type QueuedRadio struct {
 	inner Radio
 	tx    *txEngine

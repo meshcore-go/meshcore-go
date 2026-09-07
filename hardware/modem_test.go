@@ -62,8 +62,6 @@ func (m *mockTransport) injectFrame(f *KissFrame) {
 	}
 }
 
-// --- helpers ---
-
 func makeDataFrame(data []byte) *KissFrame {
 	return &KissFrame{Port: 0, Command: KISS_CMD_DATA, Data: data}
 }
@@ -75,8 +73,6 @@ func makeRxMetaFrame(snr, rssi int8) *KissFrame {
 		Data:    []byte{HW_RESP_RX_META, byte(snr), byte(rssi)},
 	}
 }
-
-// --- Tests ---
 
 func TestModem_SignalReportDisabled_ImmediateDispatch(t *testing.T) {
 	mt := newMockTransport()
@@ -111,15 +107,13 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Inject a data frame — should be queued, not dispatched.
 	mt.injectFrame(makeDataFrame([]byte{0xAA}))
 	modem.Flush()
 	if len(received) != 0 {
 		t.Fatalf("data frame should be queued, got %d dispatched", len(received))
 	}
 
-	// Inject RX_META — should enrich and dispatch the queued frame.
-	// SNR byte -6 is quarter-dB on the wire, decoded to -1.5 dB.
+	// SNR byte -6 is quarter-dB on the wire: -1.5 dB.
 	mt.injectFrame(makeRxMetaFrame(-6, -80))
 	modem.Flush()
 	if len(received) != 2 {
@@ -151,10 +145,8 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Inject first data frame — queued.
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 
-	// Inject second data frame — first should flush with zero SNR/RSSI.
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	modem.Flush()
 
@@ -178,7 +170,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 		t.Errorf("stale frame data = %X, want 01", stale.Data)
 	}
 
-	// Now deliver meta for the second frame. SNR byte 5 (quarter-dB) = 1.25 dB.
+	// SNR byte 5 is quarter-dB on the wire: 1.25 dB.
 	mt.injectFrame(makeRxMetaFrame(5, -50))
 	modem.Flush()
 
@@ -216,7 +208,6 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Inject data frame — queued.
 	mt.injectFrame(makeDataFrame([]byte{0xFF}))
 
 	mu.Lock()
@@ -226,7 +217,6 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 		t.Fatalf("frame should be pending, got %d dispatched", count)
 	}
 
-	// Wait for the timeout (1s) + margin.
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	mu.Lock()
@@ -259,13 +249,9 @@ func TestModem_SignalReportEnabled_MetaWithoutPending(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Inject RX_META with no pending data frame — should not crash,
-	// and the HW frame should still be dispatched to frame handler.
 	mt.injectFrame(makeRxMetaFrame(-10, -90))
 	modem.Flush()
 
-	// The HW frame itself goes through dispatchFrame → frameHandler.
-	// But no data frame should be dispatched with enrichment.
 	for _, f := range received {
 		if f.Command == KISS_CMD_DATA {
 			t.Error("no data frame should be dispatched when meta arrives without pending")
@@ -282,7 +268,6 @@ func TestModem_SignalReportEnabled_NonDataNonMetaImmediate(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Non-data, non-RX_META HW frame should dispatch immediately even with signal report on.
 	hwFrame := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -313,7 +298,6 @@ func TestModem_ConnectSendsSignalReport(t *testing.T) {
 		t.Fatalf("expected 1 sent frame on connect, got %d", len(sent))
 	}
 
-	// Decode the sent frame and verify it's SET_SIGNAL_REPORT with 0x01.
 	frame, err := DecodeFrame(sent[0])
 	if err != nil {
 		t.Fatalf("DecodeFrame error: %v", err)
@@ -332,8 +316,6 @@ func TestModem_ConnectSendsSignalReport(t *testing.T) {
 	}
 }
 
-// Firmware defaults signal report on, so a modem that does not want RX_META
-// must say so on every connect.
 func TestModem_ConnectSendsSignalReportOff_WhenDisabled(t *testing.T) {
 	mt := newMockTransport()
 	modem := NewKissModem(mt) // no WithSignalReport
@@ -368,13 +350,11 @@ func TestModem_SetSignalReport(t *testing.T) {
 		t.Fatalf("expected 2 sent frames, got %d", len(sent))
 	}
 
-	// First: enable (0x01)
 	frame, _ := DecodeFrame(sent[0])
 	if frame.Data[0] != HW_CMD_SET_SIGNAL_REPORT || frame.Data[1] != 0x01 {
 		t.Errorf("enable frame: subcmd=0x%02X val=0x%02X, want 0x19/0x01", frame.Data[0], frame.Data[1])
 	}
 
-	// Second: disable (0x00)
 	frame, _ = DecodeFrame(sent[1])
 	if frame.Data[0] != HW_CMD_SET_SIGNAL_REPORT || frame.Data[1] != 0x00 {
 		t.Errorf("disable frame: subcmd=0x%02X val=0x%02X, want 0x19/0x00", frame.Data[0], frame.Data[1])
@@ -410,7 +390,6 @@ func TestModem_HwResponseHandler(t *testing.T) {
 		hwCalls = append(hwCalls, subCmd)
 	})
 
-	// Inject a PING response HW frame.
 	pingResp := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -436,7 +415,6 @@ func TestModem_SignalReportEnabled_RxMetaAlsoFiresHwHandler(t *testing.T) {
 		hwCalls++
 	})
 
-	// Queue a data frame, then deliver meta.
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeRxMetaFrame(-3, -70))
 	modem.Flush()
@@ -455,20 +433,16 @@ func TestModem_SignalReportEnabled_MetaShortPayload(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Queue data frame.
 	mt.injectFrame(makeDataFrame([]byte{0xBB}))
 
-	// Inject RX_META with only 1 byte of data (missing RSSI) — should still
-	// dispatch the pending frame but without enrichment.
 	shortMeta := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
-		Data:    []byte{HW_RESP_RX_META}, // only sub-command, no SNR/RSSI
+		Data:    []byte{HW_RESP_RX_META},
 	}
 	mt.injectFrame(shortMeta)
 	modem.Flush()
 
-	// The pending frame should be dispatched (without enrichment).
 	dataFrames := 0
 	for _, f := range received {
 		if f.Command == KISS_CMD_DATA {
@@ -495,13 +469,10 @@ func TestModem_Close_CancelsPendingTimer(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Queue a data frame (starts timer).
 	mt.injectFrame(makeDataFrame([]byte{0xCC}))
 
-	// Close before timeout fires.
 	modem.Close()
 
-	// Wait past the timeout to verify the timer was cancelled.
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	mu.Lock()
@@ -521,7 +492,6 @@ func TestModem_ErrorHandler(t *testing.T) {
 		errReceived = err
 	})
 
-	// Inject a malformed HW frame (SETHARDWARE with empty data).
 	bad := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -536,9 +506,6 @@ func TestModem_ErrorHandler(t *testing.T) {
 }
 
 func TestModem_MultipleDataThenMeta(t *testing.T) {
-	// Simulates rapid-fire: data1, data2, data3, meta.
-	// data1 flushed (stale when data2 arrives), data2 flushed (stale when data3 arrives),
-	// data3 enriched by meta.
 	mt := newMockTransport()
 	modem := NewKissModem(mt, WithSignalReport(true))
 
@@ -563,13 +530,11 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 		t.Fatalf("expected 3 DATA frames and RX_META, got %d", len(received))
 	}
 
-	// First two: stale, zero SNR/RSSI
 	for i := range 2 {
 		if received[i].SNR != 0 || received[i].RSSI != 0 {
 			t.Errorf("frame %d: expected zero SNR/RSSI, got %g/%d", i, received[i].SNR, received[i].RSSI)
 		}
 	}
-	// Third: enriched
 	if received[2].SNR != 2.5 || received[2].RSSI != -40 {
 		t.Errorf("frame 2: expected SNR=2.5 RSSI=-40, got %g/%d", received[2].SNR, received[2].RSSI)
 	}
@@ -633,7 +598,6 @@ func TestModem_HandlerWorkers(t *testing.T) {
 		mt.injectFrame(makeDataFrame([]byte{byte(i)}))
 	}
 	modem.Flush()
-	// Give worker pool time to process
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
@@ -664,7 +628,6 @@ func TestModem_HandlerWatchdog(t *testing.T) {
 
 func TestModem_Stats_DroppedFrames(t *testing.T) {
 	mt := newMockTransport()
-	// Use tiny inbound buffer to force drops
 	modem := NewKissModem(mt, WithInboundBuffer(1))
 
 	// Block the drain goroutine by setting a slow handler
@@ -672,12 +635,9 @@ func TestModem_Stats_DroppedFrames(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	// Inject first frame (fills the buffer while drain is processing)
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
-	// Give drain time to pick up the first frame and start blocking
 	time.Sleep(10 * time.Millisecond)
 
-	// Fill buffer and force drops
 	for i := range 5 {
 		mt.injectFrame(makeDataFrame([]byte{byte(i + 2)}))
 	}
@@ -706,7 +666,6 @@ func TestModem_Stats_MetaTimeout(t *testing.T) {
 
 	mt.injectFrame(makeDataFrame([]byte{0xAA}))
 
-	// Wait for timeout
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	stats := modem.Stats()
@@ -722,7 +681,6 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 
 	modem.SetFrameHandler(func(f *KissFrame) {})
 
-	// Two data frames back-to-back — first one gets replaced (misattributed)
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	modem.Flush()
@@ -733,9 +691,8 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 	}
 }
 
-// sendAndAwait runs SendData (which blocks under TX flow control) in a
-// goroutine, waits until the modem has marked the TX pending, then delivers the
-// given hardware response frame and returns SendData's result.
+// sendAndAwait runs the blocking SendData in a goroutine, delivers resps once
+// the TX is pending, and returns SendData's result.
 func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissFrame) error {
 	t.Helper()
 	errCh := make(chan error, 1)
@@ -761,7 +718,6 @@ func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissF
 	}
 }
 
-// TX_DONE with result byte 0x01 = success → SendData returns nil.
 func TestModem_TxFlowControl_DoneSuccess(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -771,8 +727,6 @@ func TestModem_TxFlowControl_DoneSuccess(t *testing.T) {
 	}
 }
 
-// TX_DONE with result byte 0x00 = failure (radio busy / startSendRaw failed /
-// airtime timeout, firmware 1.16+) → SendData returns ErrTxFailed.
 func TestModem_TxFlowControl_DoneFailure(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -782,8 +736,6 @@ func TestModem_TxFlowControl_DoneFailure(t *testing.T) {
 	}
 }
 
-// 1.16 baseline: a TX_DONE with no result byte is not a guaranteed success, so
-// it is treated as a failed transmit (no pre-1.16 "missing byte = success").
 func TestModem_TxFlowControl_DoneMissingByte(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -803,8 +755,6 @@ func TestModem_HwError_TxBusyDoesNotResolveSend(t *testing.T) {
 	}
 }
 
-// Any other error code is reported to the error handler (it belongs to a
-// command reply, not to a transmit) and counted.
 func TestModem_HwError_Reported(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt)
@@ -830,7 +780,6 @@ func TestModem_HwError_Reported(t *testing.T) {
 	}
 }
 
-// Output backpressure may precede a successful TX_DONE for the accepted frame.
 func TestModem_TxFlowControl_Busy(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))

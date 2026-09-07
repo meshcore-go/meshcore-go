@@ -35,9 +35,8 @@ func NewChannelFromBase64(name string, pskBase64 string) (*ChannelEntry, error) 
 	return NewChannelFromPSK(name, psk)
 }
 
-// NewChannelFromHashtag creates a ChannelEntry for a hashtag channel.
-// The name is normalized to include a leading '#' if missing.
-// PSK is derived as SHA256("#name")[:16].
+// NewChannelFromHashtag creates a ChannelEntry for a hashtag channel, with PSK
+// SHA256("#name")[:16].
 func NewChannelFromHashtag(name string) *ChannelEntry {
 	name = NormalizeHashtag(name)
 	pskHash := sha256.Sum256([]byte(name))
@@ -57,7 +56,6 @@ func NormalizeHashtag(name string) string {
 }
 
 // DeriveHashtagPSK returns the 16-byte PSK for a hashtag channel name.
-// The name is normalized to include a leading '#' if missing.
 func DeriveHashtagPSK(name string) [16]byte {
 	name = NormalizeHashtag(name)
 	h := sha256.Sum256([]byte(name))

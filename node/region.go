@@ -23,7 +23,7 @@ func NewRegionMap() *RegionMap {
 	}
 }
 
-// Wildcard returns a copy of the wildcard region; use IsWildcard to test one for identity.
+// Wildcard returns a copy of the wildcard region.
 func (rm *RegionMap) Wildcard() *meshcore.Region {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -103,12 +103,6 @@ func (rm *RegionMap) Len() int {
 }
 
 // FindFloodMatch returns the region that matches a flood packet, or nil.
-//
-// For transport-routed packets: checks TransportCode1 against each region
-// that doesn't have RegionDenyFlood set.
-//
-// For non-transport packets: returns the wildcard if it allows flood,
-// nil if wildcard denies flood.
 func (rm *RegionMap) FindFloodMatch(pkt *meshcore.Packet) *meshcore.Region {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()

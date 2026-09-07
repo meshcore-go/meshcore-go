@@ -35,19 +35,19 @@ type Conn interface {
 type DialFunc func(ctx context.Context) (Conn, error)
 
 type BaseConfig struct {
-	// ReconnectInterval is the initial backoff delay. Doubles each failure up to MaxReconnectInterval. Default: 1s.
+	// ReconnectInterval is the initial backoff delay, doubling on each failure up to MaxReconnectInterval (default 1s).
 	ReconnectInterval time.Duration
 
-	// MaxReconnectInterval caps the backoff. Default: 30s.
+	// MaxReconnectInterval caps the backoff (default 30s).
 	MaxReconnectInterval time.Duration
 
-	// TxQueueSize is the max pending commands while disconnected. Default: 64. Oldest dropped when full.
+	// TxQueueSize is the max pending commands while disconnected, oldest dropped when full (default 64).
 	TxQueueSize int
 
-	// InboundBufferSize is the capacity of the inbound response channel. Default: 64.
+	// InboundBufferSize is the capacity of the inbound response channel (default 64).
 	InboundBufferSize int
 
-	// Logger is the structured logger. Defaults to slog.Default().
+	// Logger is the structured logger (default slog.Default()).
 	Logger *slog.Logger
 }
 
@@ -201,8 +201,7 @@ func (t *baseTransport) SetReconnectHandler(h func()) {
 	t.mu.Unlock()
 }
 
-// Flush blocks until all currently enqueued responses have been dispatched.
-// Intended for testing.
+// Flush blocks until all currently enqueued responses have been dispatched; intended for testing.
 func (t *baseTransport) Flush() {
 	done := make(chan struct{})
 	select {

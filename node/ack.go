@@ -80,8 +80,6 @@ func (at *ackTracker) handleACK(pkt *meshcore.Packet) {
 	at.notifyCRC(crc)
 }
 
-// notifyCRC resolves a pending ACK by CRC value. Called both from packet
-// dispatch and from external code (e.g. PathReturn extra data).
 func (at *ackTracker) notifyCRC(crc uint32) {
 	at.mu.Lock()
 	p, ok := at.pending[crc]

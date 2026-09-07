@@ -176,7 +176,7 @@ func TestLPPPolylineRoundTrip(t *testing.T) {
 		precision  LPPPrecision
 		simplify   LPPSimplification
 		wantFactor byte
-		minCoords  int // decoded coords should be at least this many
+		minCoords  int
 		tolerance  float64
 	}{
 		{
@@ -246,8 +246,6 @@ func TestLPPPolylineRoundTrip(t *testing.T) {
 				t.Fatalf("decoded %d coords, want >= %d", len(pl.Coordinates), tt.minCoords)
 			}
 
-			// First and last decoded points must track the input within the
-			// chosen precision's tolerance.
 			first, last := pl.Coordinates[0], pl.Coordinates[len(pl.Coordinates)-1]
 			wantFirst, wantLast := tt.coords[0], tt.coords[len(tt.coords)-1]
 			if math.Abs(first.Latitude-wantFirst.Latitude) > tt.tolerance || math.Abs(first.Longitude-wantFirst.Longitude) > tt.tolerance {
@@ -273,7 +271,6 @@ func TestLPPPolylineErrors(t *testing.T) {
 		t.Fatalf("encoder wrote %d bytes on error, want 0", got)
 	}
 
-	// Overflow: a tiny buffer cannot hold even a minimal polyline record.
 	small := NewLPPEncoderSize(8)
 	err := small.AddPolyline(1, []LPPCoordinate{{Latitude: 1, Longitude: 2}, {Latitude: 1.001, Longitude: 2.001}}, LPPPrec0_0001, LPPSimplifyNone)
 	if err == nil {

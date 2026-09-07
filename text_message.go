@@ -46,15 +46,9 @@ func BuildTextPlaintext(timestamp time.Time, flags byte, text []byte) []byte {
 	return buf
 }
 
-// BuildTextPlaintextWithAttempt builds the decrypted TXT_MSG payload for a given
-// send attempt, matching firmware BaseChatMesh::composeMsgPacket. The attempt
-// number is encoded into the low 2 bits of the flags byte (the upper bits, which
-// carry the TXT_TYPE_*, are preserved). When attempt > 3 a [0x00][attempt] tail
-// is appended: the low 2 bits wrap every 4 attempts, so the explicit attempt
-// byte keeps each retransmission's packet hash unique past that point.
-//
-// The expected ACK hash covers the flags byte, so callers must recompute
-// CalcAckHash from the payload returned here for each attempt.
+// BuildTextPlaintextWithAttempt builds the decrypted TXT_MSG payload for one
+// send attempt, encoding the attempt in the low 2 bits of flags and appending a
+// [0x00][attempt] tail past attempt 3.
 func BuildTextPlaintextWithAttempt(timestamp time.Time, flags byte, text []byte, attempt int) []byte {
 	f := (flags &^ 0x03) | byte(attempt&0x03)
 	buf := make([]byte, 0, 5+len(text)+2)

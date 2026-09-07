@@ -166,7 +166,6 @@ func TestNode_SendGroupText_Confirmed(t *testing.T) {
 		t.Fatalf("SendGroupText error: %v", err)
 	}
 
-	// Wait for the QueuedRadio to drain and send
 	time.Sleep(200 * time.Millisecond)
 
 	sent := radio.sentData()
@@ -174,7 +173,6 @@ func TestNode_SendGroupText_Confirmed(t *testing.T) {
 		t.Fatal("expected packet to be sent")
 	}
 
-	// Simulate the packet being echoed back by the mesh
 	pkt, err := meshcore.PacketFromBytes(sent[0])
 	if err != nil {
 		t.Fatalf("parsing sent packet: %v", err)
@@ -221,7 +219,6 @@ func TestNode_SendGroupText_Failed(t *testing.T) {
 	}
 }
 
-// The echo of our own group text confirms the tracker but is neither re-flooded nor delivered.
 func TestNode_SendGroupText_EchoNotForwardedOrDelivered(t *testing.T) {
 	radio := &mockRadio{}
 	ch := testChannel("echo")
@@ -416,12 +413,10 @@ func TestNode_SendTextMessage_DirectEscalatesToFlood(t *testing.T) {
 	}
 
 	allSent := radio.sentData()
-	// Initial send + up to 4 retries = 5 total (but some might combine)
 	if len(allSent) < 2 {
 		t.Errorf("expected multiple sends (retries), got %d", len(allSent))
 	}
 
-	// Check that later retries switched to flood
 	foundFlood := false
 	for i := 1; i < len(allSent); i++ {
 		pkt, err := meshcore.PacketFromBytes(allSent[i])
@@ -438,10 +433,7 @@ func TestNode_SendTextMessage_DirectEscalatesToFlood(t *testing.T) {
 	}
 }
 
-// Each retransmission must be a distinct packet so 1.16 packet-hash dedup
-// forwards it rather than dropping it as a duplicate. The node recomposes the
-// plaintext per attempt (attempt encoded into the flags byte), so every send
-// has a unique payload and therefore a unique packet hash.
+// Distinct payload per attempt, or a relay's dedup drops the retry.
 func TestNode_SendTextMessage_RetriesAreUnique(t *testing.T) {
 	radio := &mockRadio{}
 	sender := seedIdentity(0xF6)

@@ -34,16 +34,13 @@ func DeriveSharedSecret(privateKeySeed []byte, peerPublicKey []byte) ([]byte, er
 		return nil, fmt.Errorf("peer public key must be 32 bytes, got %d", len(peerPublicKey))
 	}
 
-	// Convert Ed25519 private seed → X25519 private key
 	x25519Private := edPrivateToX25519(privateKeySeed)
 
-	// Convert Ed25519 public key → X25519 public key
 	x25519Public, err := edPublicToX25519(peerPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("converting peer public key: %w", err)
 	}
 
-	// X25519 ECDH
 	shared, err := curve25519.X25519(x25519Private, x25519Public)
 	if err != nil {
 		return nil, fmt.Errorf("computing shared secret: %w", err)
@@ -52,15 +49,14 @@ func DeriveSharedSecret(privateKeySeed []byte, peerPublicKey []byte) ([]byte, er
 	return shared, nil
 }
 
-// deriveExpandedPubKey derives the public key from an expanded key's clamped
-// scalar, mirroring MeshCore's ed25519_derive_pub. The scalar must be 32 bytes.
+// deriveExpandedPubKey derives the public key from an expanded key's clamped 32-byte scalar.
 func deriveExpandedPubKey(scalar []byte) []byte {
 	a, _ := edwards25519.NewScalar().SetBytesWithClamping(scalar)
 	return new(edwards25519.Point).ScalarBaseMult(a).Bytes()
 }
 
-// signWithExpandedKey produces an RFC 8032 signature directly from an expanded
-// private key (clamped scalar ‖ prefix); crypto/ed25519 can only sign from a seed.
+// signWithExpandedKey produces an RFC 8032 signature from an expanded private
+// key (clamped scalar ‖ prefix).
 func signWithExpandedKey(scalar, prefix, pub, message []byte) []byte {
 	a, _ := edwards25519.NewScalar().SetBytesWithClamping(scalar)
 
@@ -82,8 +78,8 @@ func signWithExpandedKey(scalar, prefix, pub, message []byte) []byte {
 	return append(rBytes, s.Bytes()...)
 }
 
-// sharedSecretFromScalar X25519s with an expanded key's clamped scalar (the
-// scalar is already clamped; curve25519.X25519 re-clamps idempotently).
+// sharedSecretFromScalar X25519s with an expanded key's already-clamped scalar
+// (curve25519.X25519 re-clamps idempotently).
 func sharedSecretFromScalar(scalar, peerPublicKey []byte) ([]byte, error) {
 	x25519Public, err := edPublicToX25519(peerPublicKey)
 	if err != nil {
@@ -92,8 +88,7 @@ func sharedSecretFromScalar(scalar, peerPublicKey []byte) ([]byte, error) {
 	return curve25519.X25519(scalar, x25519Public)
 }
 
-// edPrivateToX25519 converts an Ed25519 private key seed to an X25519 private key.
-// This matches the clamping done by RFC 8032 / libsodium.
+// edPrivateToX25519 converts an Ed25519 private key seed to a clamped X25519 private key.
 func edPrivateToX25519(seed []byte) []byte {
 	h := sha512.Sum512(seed)
 	h[0] &= 248
@@ -102,8 +97,7 @@ func edPrivateToX25519(seed []byte) []byte {
 	return h[:32]
 }
 
-// edPublicToX25519 converts an Ed25519 public key to an X25519 public key
-// using the birational map from Edwards to Montgomery form.
+// edPublicToX25519 converts an Ed25519 public key to an X25519 public key.
 func edPublicToX25519(edPub []byte) ([]byte, error) {
 	p, err := new(edwards25519.Point).SetBytes(edPub)
 	if err != nil {
@@ -127,15 +121,14 @@ func Decrypt(sharedSecret []byte, src []byte) ([]byte, error) {
 	return dest, nil
 }
 
-// Encrypt encrypts src using AES-128 ECB with the first 16 bytes of sharedSecret.
-// Partial blocks are zero-padded to 16 bytes.
+// Encrypt encrypts src using AES-128 ECB with the first 16 bytes of
+// sharedSecret, zero-padding a partial final block.
 func Encrypt(sharedSecret []byte, src []byte) ([]byte, error) {
 	block, err := aes.NewCipher(sharedSecret[:cipherKeySize])
 	if err != nil {
 		return nil, fmt.Errorf("creating cipher: %w", err)
 	}
 
-	// Output is always a multiple of 16
 	outLen := len(src)
 	if outLen%aes.BlockSize != 0 {
 		outLen += aes.BlockSize - (outLen % aes.BlockSize)
@@ -156,8 +149,7 @@ func Encrypt(sharedSecret []byte, src []byte) ([]byte, error) {
 	return dest, nil
 }
 
-// EncryptThenMAC encrypts src, then prepends a 2-byte HMAC-SHA256 MAC.
-// Returns: [MAC (2 bytes)] [encrypted data].
+// EncryptThenMAC encrypts src and returns a 2-byte HMAC-SHA256 MAC followed by the ciphertext.
 func EncryptThenMAC(sharedSecret []byte, src []byte) ([]byte, error) {
 	encrypted, err := Encrypt(sharedSecret, src)
 	if err != nil {
@@ -175,9 +167,7 @@ func EncryptThenMAC(sharedSecret []byte, src []byte) ([]byte, error) {
 	return result, nil
 }
 
-// MACThenDecrypt verifies the 2-byte HMAC-SHA256 MAC, then decrypts.
-// src must be: [MAC (2 bytes)] [encrypted data].
-// Returns ErrBadMAC if the MAC is invalid, ErrTooShort if src has no ciphertext.
+// MACThenDecrypt verifies the leading 2-byte HMAC-SHA256 MAC of src and decrypts the rest.
 func MACThenDecrypt(sharedSecret []byte, src []byte) ([]byte, error) {
 	if len(src) <= cipherMACSize {
 		return nil, fmt.Errorf("%w: %d bytes", ErrTooShort, len(src))

@@ -57,8 +57,7 @@ func newTestRouter(opts testRouterOpts) *router {
 	n.allowPacket = opts.allowPacket
 	n.extraAcks = opts.extraAcks
 	n.router.node = n
-	// Direct relays and flood relays share one hook here; tests assert on payload
-	// and priority, and node_test.go covers the delay wiring.
+	// Direct and flood relays share one hook; tests assert payload and priority.
 	n.router.send = func(data []byte, priority uint8, _ time.Duration) error {
 		if opts.sendDirect != nil && priority != PriorityFloodRelay {
 			return opts.sendDirect(data, priority)
@@ -396,7 +395,6 @@ func TestRouter_DirectControlZeroHopOnly(t *testing.T) {
 	}
 }
 
-// A relayed direct packet is re-transmitted but never handed to local handlers.
 func TestNode_DirectRelayNotDelivered(t *testing.T) {
 	identity := seedIdentity(0x01)
 	other := seedIdentity(0x02)
@@ -616,7 +614,6 @@ func TestRouter_TraceMultiByteHashes(t *testing.T) {
 	}
 }
 
-// allowForward is the last check: it must not see packets rejected by earlier tests.
 func TestRouter_AllowForwardConsultedLast(t *testing.T) {
 	identity := seedIdentity(0x01)
 	newRouter := func(asked *bool) *router {
@@ -678,8 +675,6 @@ func multiAckDirect(path []byte, crc []byte, remaining uint8) []byte {
 	return makeDirectPacket(meshcore.PayloadTypeMultiPart, path, payload)
 }
 
-// A multipart ACK we are the next hop for is unwrapped and re-sent as its own
-// multipart copies plus a plain ACK, matching Mesh::forwardMultipartDirect.
 func TestRouter_ForwardMultipartDirect(t *testing.T) {
 	identity := seedIdentity(0x01)
 	other := seedIdentity(0x02)
@@ -721,8 +716,6 @@ func TestRouter_ForwardMultipartDirect(t *testing.T) {
 	}
 }
 
-// Multipart copies of one ACK dedup against each other but not against the
-// plain ACK, which is what makes the extra copies worth sending.
 func TestRouter_MultipartACKDedup(t *testing.T) {
 	identity := seedIdentity(0x01)
 	other := seedIdentity(0x02)

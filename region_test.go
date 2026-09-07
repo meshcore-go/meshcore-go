@@ -73,7 +73,6 @@ func TestRegionKey_CalcTransportCode_DifferentKeys(t *testing.T) {
 }
 
 func TestRegionKey_CalcTransportCode_NotReserved(t *testing.T) {
-	// Run many iterations — codes 0x0000 and 0xFFFF should never appear.
 	key := DeriveRegionKey("#test-reserved")
 	for i := range 1000 {
 		payload := []byte{byte(i >> 8), byte(i)}

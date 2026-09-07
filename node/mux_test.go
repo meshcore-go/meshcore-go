@@ -171,7 +171,6 @@ func TestMux_SendGoesToModem(t *testing.T) {
 		t.Fatalf("SendData error: %v", err)
 	}
 
-	// SendData now goes through the mux queue
 	time.Sleep(200 * time.Millisecond)
 
 	sent := modem.sentData()
@@ -491,8 +490,6 @@ func TestMux_SharedQueueAcrossRadios(t *testing.T) {
 	}
 }
 
-// A packet one virtual radio sends must not be relayed by another radio on the
-// same modem when a neighbour bounces it back (firmware markSeen-on-send).
 func TestMux_BouncedOwnPacketIsMarkedDoNotRetransmit(t *testing.T) {
 	modem := &mockModem{}
 	mux := NewRadioMux(modem)

@@ -37,22 +37,16 @@ const (
 	LPPPolyline           byte = 240
 )
 
-// LPPMinPolylineSize is the smallest valid polyline payload: 1 size byte +
-// 1 factor byte + 3 lat bytes + 3 lon bytes (no deltas).
+// LPPMinPolylineSize is the smallest valid polyline payload: size + factor + 3-byte lat + 3-byte lon.
 const LPPMinPolylineSize = 8
 
-// lppDefaultMaxSize matches the common ElectronicCats `CayenneLPP lpp(255)`
-// buffer size. It only bounds polyline encoding (the polyline payload is
-// capped at maxSize-2, mirroring the firmware).
+// lppDefaultMaxSize matches ElectronicCats `CayenneLPP lpp(255)`; it bounds polyline encoding only.
 const lppDefaultMaxSize = 255
 
-// polylineScale is the fixed 0.0001° base resolution (ElectronicCats
-// CayenneLPPPolyline scaleFactor).
+// polylineScale is the fixed 0.0001° base resolution.
 const polylineScale = 10000.0
 
-// LPPPrecision selects the polyline delta-compression precision. The values
-// are the on-wire factor bytes (227-239) used by ElectronicCats; the inline
-// resolution is shown alongside each.
+// LPPPrecision selects the polyline delta-compression precision, as the on-wire factor byte.
 type LPPPrecision byte
 
 const (
@@ -71,8 +65,7 @@ const (
 	LPPPrec1_0    LPPPrecision = 239 // 1.0°
 )
 
-// LPPSimplification selects the polyline simplification algorithm applied
-// before delta encoding.
+// LPPSimplification selects the polyline simplification algorithm.
 type LPPSimplification byte
 
 const (
@@ -81,8 +74,7 @@ const (
 	LPPSimplifyDouglasPeucker        LPPSimplification = 2 // Douglas-Peucker (default)
 )
 
-// polylineValueMap maps the special precision factor bytes (>=227) to their
-// quantization factor, mirroring ElectronicCats CayenneLPPPolyline s_valueMap.
+// polylineValueMap maps precision factor bytes (>=227) to their quantization factor.
 var polylineValueMap = map[byte]float64{
 	227: 1.0, 228: 2.0, 229: 5.0, 230: 10.0, 231: 20.0, 232: 50.0,
 	233: 100.0, 234: 200.0, 235: 500.0, 236: 1000.0, 237: 2000.0,
@@ -125,8 +117,7 @@ type LPPCoordinate struct {
 	Longitude float64
 }
 
-// LPPPolylineValue holds a decoded polyline: the raw factor/precision byte and
-// the reconstructed coordinate list.
+// LPPPolylineValue is a decoded polyline: its factor byte and coordinate list.
 type LPPPolylineValue struct {
 	Factor      byte
 	Coordinates []LPPCoordinate
@@ -140,8 +131,7 @@ func LPPDecode(data []byte) ([]LPPReading, error) {
 		typ := data[i+1]
 		i += 2
 
-		// MeshCore's LPPReader treats channel 0 as the end-of-data marker
-		// (any type), and telemetry channels start at 1 (TELEM_CHANNEL_SELF).
+		// channel 0 is the end-of-data marker; telemetry channels start at 1
 		if channel == 0 {
 			break
 		}
@@ -161,8 +151,7 @@ func LPPDecode(data []byte) ([]LPPReading, error) {
 		case LPPGPS:
 			need = 9
 		case LPPPolyline:
-			// Polyline is variable length: the first payload byte is the
-			// total polyline size (including itself and the factor byte).
+			// first payload byte is the total polyline size, including itself and the factor byte
 			if len(data)-i < 1 {
 				return nil, fmt.Errorf("truncated lpp polyline for channel %d: missing size byte", channel)
 			}
@@ -238,8 +227,7 @@ func LPPDecode(data []byte) ([]LPPReading, error) {
 
 type LPPEncoder struct {
 	buf bytes.Buffer
-	// maxSize mirrors the ElectronicCats `CayenneLPP(size)` buffer size. It
-	// only bounds polyline encoding; the simple Add* methods are unbounded.
+	// bounds polyline encoding only; the simple Add* methods are unbounded
 	maxSize int
 }
 
@@ -248,9 +236,7 @@ func NewLPPEncoder() *LPPEncoder {
 }
 
 // NewLPPEncoderSize creates an encoder whose polyline output matches an
-// ElectronicCats `CayenneLPP(size)` instance (polyline payload capped at
-// size-2 bytes). Use this when you need byte-identical polyline output for a
-// specific firmware buffer size.
+// ElectronicCats `CayenneLPP(size)` instance.
 func NewLPPEncoderSize(size int) *LPPEncoder {
 	return &LPPEncoder{maxSize: size}
 }
@@ -427,19 +413,14 @@ func (e *LPPEncoder) AddSwitch(channel byte, value byte) {
 	_ = e.buf.WriteByte(value)
 }
 
-// AddPolyline encodes a GPS track (>=2 coordinates) as an LPP polyline,
-// byte-compatible with ElectronicCats CayenneLPP::addPolyline. The first point
-// is stored at full 0.0001° resolution; subsequent points are stored as packed
-// signed-nibble deltas at the chosen precision. Returns an error if fewer than
-// 2 coordinates are given or the encoded record would overflow the encoder's
-// max size.
+// AddPolyline encodes a GPS track (>=2 coordinates) as an LPP polyline: a full
+// 0.0001° first point followed by packed signed-nibble deltas.
 func (e *LPPEncoder) AddPolyline(channel byte, coords []LPPCoordinate, precision LPPPrecision, simplification LPPSimplification) error {
 	return e.addPolyline(channel, coords, byte(precision), simplification)
 }
 
-// AddPolylineFactor is like AddPolyline but takes a raw quantization factor
-// (1-199, where 1 == 0.0001° and the resolution scales linearly) instead of a
-// named precision. This mirrors the factor-based ElectronicCats encode overload.
+// AddPolylineFactor is AddPolyline with a raw quantization factor (1-199, where
+// 1 == 0.0001°) instead of a named precision.
 func (e *LPPEncoder) AddPolylineFactor(channel byte, coords []LPPCoordinate, factor byte, simplification LPPSimplification) error {
 	return e.addPolyline(channel, coords, factor, simplification)
 }
@@ -478,9 +459,7 @@ func decodeInt24(b []byte) int32 {
 	return v
 }
 
-// polylineFactor maps a factor/precision byte to its quantization factor,
-// mirroring ElectronicCats CayenneLPPPolyline::getFactor. Returns 0 for
-// invalid factors (0, or reserved values >=200 not in the precision map).
+// polylineFactor maps a factor/precision byte to its quantization factor, or 0 if invalid.
 func polylineFactor(factor byte) float64 {
 	switch {
 	case factor == 0:
@@ -492,9 +471,7 @@ func polylineFactor(factor byte) float64 {
 	}
 }
 
-// packDelta packs two signed 4-bit deltas into one byte, matching the
-// little-endian DeltaCoord{int8_t dLat:4; int8_t dLon:4;} layout used by
-// ElectronicCats on mainstream targets (dLat in the low nibble).
+// packDelta packs two signed 4-bit deltas into one byte, dLat in the low nibble.
 func packDelta(dLat, dLon int) byte {
 	return byte((dLon&0x0F)<<4 | (dLat & 0x0F))
 }
@@ -519,8 +496,7 @@ func lppAbs(v int) int {
 	return v
 }
 
-// decodePolyline reconstructs a polyline from its on-wire payload (including
-// the leading size byte), mirroring ElectronicCats CayenneLPPPolyline::decode.
+// decodePolyline reconstructs a polyline from its on-wire payload, leading size byte included.
 func decodePolyline(buf []byte) LPPPolylineValue {
 	var out LPPPolylineValue
 	if len(buf) < 7 {
@@ -536,8 +512,6 @@ func decodePolyline(buf []byte) LPPPolylineValue {
 	// One coordinate per delta byte (buf[8:]) plus the initial point.
 	out.Coordinates = make([]LPPCoordinate, 0, max(len(buf)-7, 1))
 
-	// The initial lat/lon are signed 24-bit big-endian values (same layout as
-	// decodeInt24), scaled by the factor.
 	prevLat := int32(float64(decodeInt24(buf[2:5])) * dFactor)
 	prevLon := int32(float64(decodeInt24(buf[5:8])) * dFactor)
 
@@ -563,9 +537,7 @@ func decodePolyline(buf []byte) LPPPolylineValue {
 	return out
 }
 
-// polylineEncoder is a faithful port of ElectronicCats CayenneLPPPolyline's
-// stateful encoder (error-feedback delta quantization with intermediate-point
-// insertion and optional perpendicular-distance merging).
+// polylineEncoder is a port of ElectronicCats CayenneLPPPolyline's stateful delta encoder.
 type polylineEncoder struct {
 	buf     []byte
 	maxSize int
@@ -576,8 +548,7 @@ type polylineEncoder struct {
 	errLon  float64
 }
 
-// encode mirrors CayenneLPPPolyline::encode(coords, factor, simplification).
-// Returns nil for fewer than 2 coordinates or an invalid factor.
+// encode returns nil for fewer than 2 coordinates or an invalid factor.
 func (p *polylineEncoder) encode(coords []LPPCoordinate, factor byte, simplification LPPSimplification) []byte {
 	p.buf = p.buf[:0]
 	p.prevLat, p.prevLon, p.errLat, p.errLon = 0, 0, 0, 0
@@ -600,8 +571,7 @@ func (p *polylineEncoder) encode(coords []LPPCoordinate, factor byte, simplifica
 
 	optimize := simplification == LPPSimplifyPerpendicularDistance
 
-	// The initial point is encoded twice: once to seed the encoder and again
-	// at the end so the rewritten header byte[0] carries the final length.
+	// pushFirst runs again at the end so the rewritten header carries the final length
 	lat0 := coords2[0].Latitude * polylineScale / dFactor
 	lon0 := coords2[0].Longitude * polylineScale / dFactor
 
@@ -641,10 +611,7 @@ func (p *polylineEncoder) writeHeader(lat, lon int32, factor byte) {
 }
 
 func (p *polylineEncoder) push(lat, lon float64, optimize bool) {
-	// Defensive bound: the intermediate-point recursion below can otherwise
-	// append unbounded deltas for pathologically distant points (overflowing
-	// the 1-byte size field). Realistic tracks never reach maxSize here, so
-	// this never alters output that the reference encoder can also produce.
+	// bounds the intermediate-point recursion below, which can overflow the 1-byte size field
 	if len(p.buf) >= p.maxSize {
 		return
 	}
@@ -691,8 +658,6 @@ func (p *polylineEncoder) writeDelta(dLat, dLon int, optimize bool) {
 	p.buf = append(p.buf, packDelta(dLat, dLon))
 }
 
-// douglasPeucker simplifies a coordinate list, mirroring
-// CayenneLPPPolyline::douglasPeucker.
 func douglasPeucker(points []LPPCoordinate, epsilon float64) []LPPCoordinate {
 	if len(points) < 2 {
 		return nil
@@ -727,8 +692,6 @@ func douglasPeucker(points []LPPCoordinate, epsilon float64) []LPPCoordinate {
 	return []LPPCoordinate{points[0], points[end]}
 }
 
-// perpendicularDistance is the point-to-line distance helper used by
-// douglasPeucker, mirroring CayenneLPPPolyline::distance.
 func perpendicularDistance(point, lineStart, lineEnd LPPCoordinate) float64 {
 	dLat := lineEnd.Latitude - lineStart.Latitude
 	dLon := lineEnd.Longitude - lineStart.Longitude

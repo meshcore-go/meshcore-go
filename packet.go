@@ -15,7 +15,7 @@ type Packet struct {
 	TransportCode1 uint16 // Little Endian
 	TransportCode2 uint16 // Little Endian
 
-	SNR           float32 // Real decibels. See SNRFromWire for the wire format.
+	SNR           float32 // real dB; see SNRFromWire
 	RSSI          int8
 	HasSignalInfo bool
 
@@ -28,20 +28,12 @@ func (p *Packet) MarkDoNotRetransmit() { p.noRetransmit = true }
 // IsMarkedDoNotRetransmit reports whether MarkDoNotRetransmit was called on this packet.
 func (p *Packet) IsMarkedDoNotRetransmit() bool { return p.noRetransmit }
 
-// SNRFromWire converts an on-wire SNR byte to real decibels.
-//
-// MeshCore firmware encodes SNR in quarter-dB units: it sends
-// (int8)round(snr_dB * 4) (see MeshCore Packet.h getSNR()/_snr,
-// Dispatcher.cpp _snr = getLastSNR()*4, and the companion/KISS frame
-// builders). Dividing by 4 recovers real dB with exact 0.25 dB resolution.
+// SNRFromWire converts an on-wire SNR byte (quarter-dB units) to real decibels.
 func SNRFromWire(b int8) float32 { return float32(b) / 4 }
 
 func snrDBFromWire(b int8) float32 { return SNRFromWire(b) }
 
-// PathSNRdB decodes a single per-hop SNR byte from a trace Path (or a
-// companion PushTraceDataResponse.PathSnrs slice) into real decibels. These
-// path bytes are kept in their raw on-wire quarter-dB form; use this helper
-// to convert them. See SNRFromWire for the wire format.
+// PathSNRdB converts a per-hop SNR byte from a trace path into real decibels.
 func PathSNRdB(b byte) float32 { return SNRFromWire(int8(b)) }
 
 func MakeHeader(routeType, payloadType, payloadVer byte) byte {
@@ -263,8 +255,7 @@ func (p *Packet) IsTransport() bool {
 	return rt == RouteTypeTransportFlood || rt == RouteTypeTransportDirect
 }
 
-// AppendPathHash appends a path hash to the packet's path. It returns false
-// if the path is already full (would exceed MaxPathSize).
+// AppendPathHash appends a path hash, returning false if the path is already full.
 func (p *Packet) AppendPathHash(hash []byte) bool {
 	hashSize, count := pathLenFields(p.PathLength)
 	if len(hash) < int(hashSize) {
@@ -280,8 +271,8 @@ func (p *Packet) AppendPathHash(hash []byte) bool {
 	return true
 }
 
-// RemoveFirstPathHash removes the first hash from the packet's path,
-// shifting remaining hashes left. Returns false if the path is empty.
+// RemoveFirstPathHash removes the first hash from the packet's path, returning
+// false if the path is empty.
 func (p *Packet) RemoveFirstPathHash() bool {
 	hashSize, count := pathLenFields(p.PathLength)
 	if count == 0 || len(p.Path) < int(hashSize) {
@@ -294,10 +285,8 @@ func (p *Packet) RemoveFirstPathHash() bool {
 
 const PacketHashSize = 8
 
-// PacketHash computes the dedup fingerprint for this packet.
-// Matches MeshCore's Packet::calculatePacketHash: SHA256(payloadType + payload)
-// truncated to 8 bytes. TRACE packets also include PathLength to handle
-// revisited nodes. Returns the hash as a [PacketHashSize]byte.
+// PacketHash computes the dedup fingerprint: SHA256(payloadType ‖ payload)
+// truncated to 8 bytes, with PathLength mixed in for TRACE packets.
 func (p *Packet) PacketHash() [PacketHashSize]byte {
 	h := sha256.New()
 	h.Write([]byte{p.PayloadType()})

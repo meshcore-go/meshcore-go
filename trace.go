@@ -67,9 +67,7 @@ func (t *Trace) ToBytes() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// PathHashSize returns the per-hop hash size in bytes, derived from bits 0-1
-// of the Flags field. Matches C++ MeshCore: 1 << (flags & 0x03), giving
-// possible sizes of 1, 2, 4, or 8 bytes.
+// PathHashSize returns the per-hop hash size in bytes: 1 << (Flags & 0x03).
 func (t *Trace) PathHashSize() uint8 {
 	return 1 << (t.Flags & 0x03)
 }

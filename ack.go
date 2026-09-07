@@ -6,16 +6,9 @@ import (
 	"fmt"
 )
 
-// Ack represents an ACK payload. The wire format is variable-length:
-//   - Bytes 0-3: CRC (SHA256 truncated to 4 bytes)
-//   - Byte 4 (optional): extended attempt byte (makes packet hash unique per retry)
-//   - Byte 5 (optional): random byte (further dedup uniqueness)
-//
-// Receivers match on the first 4 bytes (CRC) only. The extended bytes exist
-// to prevent the dedup table from dropping retransmitted ACKs.
+// Ack is an ACK payload: a 4-byte CRC, optionally followed by an attempt byte
+// and a random byte that keep retransmissions out of the dedup table.
 type Ack struct {
-	// Payload is the raw ACK bytes (4-6 bytes). The first 4 bytes are the
-	// CRC used for matching; remaining bytes are dedup salt.
 	Payload []byte
 }
 
@@ -45,12 +38,8 @@ func (a *Ack) ToBytes() ([]byte, error) {
 	return out, nil
 }
 
-// CalcAckHash computes the 4-byte ACK CRC for a text message.
-// It matches MeshCore C++ firmware: SHA256(plaintext_data || sender_pub_key)
-// truncated to 4 bytes (little-endian uint32).
-//
-// plaintext_data is the decrypted message content (timestamp + flags + text).
-// senderPubKey is the 32-byte Ed25519 public key of the sender.
+// CalcAckHash computes the 4-byte ACK CRC: SHA256(plaintext ‖ senderPubKey)
+// truncated to a little-endian uint32.
 func CalcAckHash(plaintextData []byte, senderPubKey []byte) uint32 {
 	h := sha256.New()
 	h.Write(plaintextData)
@@ -59,11 +48,7 @@ func CalcAckHash(plaintextData []byte, senderPubKey []byte) uint32 {
 	return binary.LittleEndian.Uint32(sum[:4])
 }
 
-// BuildAckPayload constructs the full ACK payload (up to 6 bytes) matching
-// the current C++ firmware format:
-//   - Bytes 0-3: SHA256(plaintext || senderPubKey)[0:4]
-//   - Byte 4: attemptByte (last byte of decrypted payload — makes retries unique)
-//   - Byte 5: randomByte (caller should supply a random byte)
+// BuildAckPayload builds the 6-byte ACK payload: CRC, attempt byte, random byte.
 func BuildAckPayload(plaintextData []byte, senderPubKey []byte, attemptByte byte, randomByte byte) []byte {
 	crc := CalcAckHash(plaintextData, senderPubKey)
 	payload := make([]byte, 6)

@@ -6,8 +6,7 @@ import (
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
 
-// Firmware Dispatcher::checkRecv processes a flood packet immediately below
-// minRxDelay and never holds one longer than maxRxDelay.
+// Bounds taken from firmware Dispatcher::checkRecv.
 const (
 	minRxDelay = 50 * time.Millisecond
 	maxRxDelay = 32 * time.Second
@@ -15,9 +14,8 @@ const (
 	inboundQueueSize = 64
 )
 
-// onData routes a received packet. Without a receive delay it runs inline on the
-// radio's read goroutine; with one, every packet is handed to the inbound
-// goroutine so a held packet never races one that arrived behind it.
+// onData runs inline on the radio's read goroutine unless a receive delay is set,
+// which routes every packet through the inbound goroutine to preserve arrival order.
 func (n *Node) onData(pkt *meshcore.Packet) {
 	if n.inbound == nil {
 		n.processPacket(pkt)
@@ -30,8 +28,6 @@ func (n *Node) onData(pkt *meshcore.Packet) {
 	n.queueInbound(pkt)
 }
 
-// inboundDelay is how long to hold pkt before routing it. Direct packets and
-// delays under minRxDelay are not held; anything longer is capped at maxRxDelay.
 func (n *Node) inboundDelay(pkt *meshcore.Packet) time.Duration {
 	if !pkt.IsRouteFlood() {
 		return 0
@@ -55,8 +51,7 @@ func (n *Node) queueInbound(pkt *meshcore.Packet) {
 	}
 }
 
-// runInbound drains held packets one at a time, preserving the single-goroutine
-// dispatch that handlers see when no receive delay is configured.
+// runInbound drains held packets one at a time so handlers never run concurrently.
 func (n *Node) runInbound() {
 	for {
 		select {
@@ -79,10 +74,7 @@ func (n *Node) processPacket(pkt *meshcore.Packet) {
 		return
 	}
 
-	// Early ACK receive: process ACKs on direct-routed packets before
-	// routing decisions — matches C++ firmware behavior. This lets us
-	// notice ACKs passing through us as a relay, not just ones delivered
-	// to us.
+	// Catches ACKs passing through us as a relay, which routing would not deliver locally.
 	if pkt.IsRouteDirect() && pkt.PayloadType() == meshcore.PayloadTypeAck && pkt.PathHashCount() > 0 {
 		n.acks.handleACK(pkt)
 	}

@@ -1,11 +1,6 @@
 package companion
 
-// SupportedProtocolVersion is the protocol version this library advertises to
-// the firmware via CMD_DEVICE_QUERY (app_target_ver). Firmware 1.16 gates only
-// one response-format behavior on it: app_target_ver >= 3 selects the V3
-// contact/channel message-receive frames (RESP_*_MSG_RECV_V3, which prepend SNR
-// + 2 reserved bytes). There are no higher app-version gates, so 3 unlocks every
-// 1.16 response format this library parses.
+// SupportedProtocolVersion is the app_target_ver this library advertises in CMD_DEVICE_QUERY.
 const SupportedProtocolVersion = 3
 
 // Serial frame types.
@@ -177,12 +172,12 @@ const OutPathUnknown byte = 0xFF
 // Text message types (firmware TXT_TYPE_*).
 const (
 	TxtTypePlain       byte = 0
-	TxtTypeCLIData     byte = 1 // CLI command / reply
+	TxtTypeCLIData     byte = 1
 	TxtTypeSignedPlain byte = 2 // text preceded by a 4-byte sender pubkey prefix
 )
 
 // Frame size limits.
 const (
-	MaxFrameSize    = 176 // firmware BaseSerialInterface.h MAX_FRAME_SIZE = 176 ("+4 for transport codes / region scoping")
+	MaxFrameSize    = 176 // firmware BaseSerialInterface.h MAX_FRAME_SIZE
 	FrameHeaderSize = 3   // type(1) + length(2)
 )

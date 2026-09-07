@@ -12,9 +12,7 @@ func dedupPacket(payload []byte) *Packet {
 	}
 }
 
-// dedupACKPacket builds an ACK packet with the given 4-byte CRC plus a salt
-// byte. In MeshCore 1.16 ACK payloads carry a random salt byte so each ACK
-// packet hashes uniquely; dedup is by packet hash like every other packet.
+// MeshCore 1.16 ACK payloads carry a random salt byte, so each ACK packet hashes uniquely.
 func dedupACKPacket(crc uint32, salt byte) *Packet {
 	payload := make([]byte, 5)
 	binary.LittleEndian.PutUint32(payload, crc)
@@ -60,8 +58,6 @@ func TestDedup_ACK_FirstSeenReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestDedup_ACK_IdenticalPacketDeduped verifies that a byte-identical ACK
-// packet (same CRC and same salt) is still deduped by packet hash.
 func TestDedup_ACK_IdenticalPacketDeduped(t *testing.T) {
 	var d DedupCache
 	pkt := dedupACKPacket(0x11223344, 0x01)
@@ -73,9 +69,6 @@ func TestDedup_ACK_IdenticalPacketDeduped(t *testing.T) {
 	}
 }
 
-// TestDedup_ACK_SameCRCDifferentSaltNotDeduped verifies MeshCore 1.16
-// semantics: two ACK packets sharing the same 4-byte CRC but carrying
-// different salt bytes hash differently and are NOT deduped.
 func TestDedup_ACK_SameCRCDifferentSaltNotDeduped(t *testing.T) {
 	var d DedupCache
 	if got := d.HasSeen(dedupACKPacket(0x11223344, 0x01)); got {
@@ -105,8 +98,6 @@ func TestDedup_RingBufferEviction(t *testing.T) {
 	}
 }
 
-// TestDedup_ACK_RingBufferEviction verifies ACKs share the unified packet-hash
-// ring buffer: after MaxPacketHashes newer unique ACKs, the oldest is evicted.
 func TestDedup_ACK_RingBufferEviction(t *testing.T) {
 	var d DedupCache
 	first := dedupACKPacket(1, 0x00)

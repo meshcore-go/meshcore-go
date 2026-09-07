@@ -7,23 +7,19 @@ import (
 )
 
 const (
-	// KISS Protocol Constants
 	KISS_FEND  = 0xC0 // Frame End
 	KISS_FESC  = 0xDB // Frame Escape
 	KISS_TFEND = 0xDC // Transposed Frame End
 	KISS_TFESC = 0xDD // Transposed Frame Escape
 
-	// KISS Frame Limits
 	KISS_MAX_FRAME_SIZE         = 512
 	KISS_MAX_PACKET_SIZE        = 255
 	KISS_MAX_DECODED_FRAME_SIZE = KISS_MAX_FRAME_SIZE + 2
 	KISS_MAX_ENCODED_FRAME_SIZE = 2*KISS_MAX_DECODED_FRAME_SIZE + 2
 
-	// KISS Command Masks
 	KISS_MASK_PORT = 0xF0
 	KISS_MASK_CMD  = 0x0F
 
-	// KISS Commands
 	KISS_CMD_DATA        = 0x00
 	KISS_CMD_TXDELAY     = 0x01
 	KISS_CMD_PERSISTENCE = 0x02
@@ -33,7 +29,6 @@ const (
 	KISS_CMD_SETHARDWARE = 0x06
 	KISS_CMD_RETURN      = 0xFF
 
-	// KISS Default Parameters
 	KISS_DEFAULT_TXDELAY     = 50
 	KISS_DEFAULT_PERSISTENCE = 63
 	KISS_DEFAULT_SLOTTIME    = 10
@@ -72,7 +67,6 @@ const (
 	HW_RESP_TX_DONE = 0xF8 // Unsolicited: transmission complete
 	HW_RESP_RX_META = 0xF9 // Unsolicited: received packet metadata
 
-	// Hardware Error Codes
 	HW_ERR_INVALID_LENGTH = 0x01
 	HW_ERR_INVALID_PARAM  = 0x02
 	HW_ERR_NO_CALLBACK    = 0x03
@@ -81,7 +75,6 @@ const (
 	HW_ERR_ENCRYPT_FAILED = 0x06
 	HW_ERR_TX_BUSY        = 0x07
 
-	// Firmware Version
 	KISS_FIRMWARE_VERSION = 1
 )
 
@@ -99,12 +92,12 @@ type KissFrame struct {
 	Command byte
 	Data    []byte
 
-	SNR           float32 // Real decibels. See snrDBFromWire for the wire format.
+	SNR           float32 // Real decibels, not the quarter-dB wire value.
 	RSSI          int8
 	HasSignalInfo bool
 }
 
-// snrDBFromWire decodes the firmware's signed int8(snr_dB * 4) quarter-dB value.
+// snrDBFromWire decodes the signed int8(snr_dB * 4) quarter-dB wire value.
 func snrDBFromWire(b int8) float32 { return float32(b) / 4 }
 
 // RadioConfig holds the radio configuration parameters.
@@ -138,8 +131,7 @@ func RadioConfigFromBytes(data []byte) (*RadioConfig, error) {
 	}, nil
 }
 
-// HwResp returns the hardware response code for a given command.
-// Response code = command | 0x80.
+// HwResp returns the hardware response code for a given command (command | 0x80).
 func HwResp(cmd byte) byte {
 	return cmd | 0x80
 }
@@ -165,9 +157,7 @@ func DecodeHardwareFrame(frame *KissFrame) (subCmd byte, data []byte, err error)
 	return frame.Data[0], frame.Data[1:], nil
 }
 
-// EscapeData applies KISS byte-stuffing to the given data. Any FEND (0xC0) byte
-// is replaced with FESC TFEND (0xDB 0xDC), and any FESC (0xDB) byte is replaced
-// with FESC TFESC (0xDB 0xDD).
+// EscapeData applies KISS byte-stuffing to the given data.
 func EscapeData(data []byte) []byte {
 	escaped := make([]byte, 0, len(data))
 	for _, b := range data {
@@ -183,8 +173,7 @@ func EscapeData(data []byte) []byte {
 	return escaped
 }
 
-// UnescapeData reverses KISS byte-stuffing. FESC TFEND (0xDB 0xDC) is restored
-// to FEND (0xC0), and FESC TFESC (0xDB 0xDD) is restored to FESC (0xDB).
+// UnescapeData reverses KISS byte-stuffing.
 func UnescapeData(data []byte) ([]byte, error) {
 	unescaped := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {
@@ -234,7 +223,6 @@ func DecodeFrame(raw []byte) (*KissFrame, error) {
 		return nil, ErrFrameTooShort
 	}
 
-	// Strip leading/trailing FEND markers
 	start := 0
 	end := len(raw)
 	if raw[start] == KISS_FEND {
@@ -270,15 +258,12 @@ func DecodeFrame(raw []byte) (*KissFrame, error) {
 	}, nil
 }
 
-// ExtractFrames extracts all complete KISS frames from a byte stream.
-// It returns the decoded frames, any remaining bytes that don't form a
-// complete frame (useful for streaming/buffered reads), and any decode
-// errors encountered for malformed frames that were skipped.
+// ExtractFrames extracts complete KISS frames from a byte stream, returning
+// them with any trailing partial bytes and the errors from malformed frames.
 func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 	var frames []*KissFrame
 	var errs []error
 
-	// Skip any bytes before the first FEND
 	start := -1
 	for i, b := range stream {
 		if b == KISS_FEND {
@@ -300,7 +285,6 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 			return frames, stream[i-1:], errs
 		}
 
-		// Find the closing FEND
 		frameStart := i - 1 // include the preceding FEND
 		found := false
 		for j := i; j < len(stream); j++ {
@@ -318,7 +302,6 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 			}
 		}
 		if !found {
-			// Incomplete frame — return remainder
 			return frames, stream[frameStart:], errs
 		}
 	}
@@ -326,8 +309,6 @@ func ExtractFrames(stream []byte) ([]*KissFrame, []byte, []error) {
 	return frames, stream[len(stream)-1:], errs
 }
 
-// hwErrors names the modem's HW_ERR_* codes; HwErrorFor turns one into an
-// error so a rejected command reports why instead of timing out silently.
 var hwErrors = map[byte]error{
 	HW_ERR_INVALID_LENGTH: errors.New("invalid length"),
 	HW_ERR_INVALID_PARAM:  errors.New("invalid parameter"),
