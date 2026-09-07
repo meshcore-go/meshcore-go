@@ -901,3 +901,45 @@ func FuzzPacketFromBytes(f *testing.F) {
 		}
 	})
 }
+
+func TestPacket_DoNotRetransmit(t *testing.T) {
+	pkt := &Packet{Header: MakeHeader(RouteTypeFlood, PayloadTypeTxtMsg, 0), Payload: []byte{0x01}}
+	if pkt.IsMarkedDoNotRetransmit() {
+		t.Fatal("new packet is marked do-not-retransmit")
+	}
+
+	pkt.MarkDoNotRetransmit()
+	if !pkt.IsMarkedDoNotRetransmit() {
+		t.Fatal("MarkDoNotRetransmit() did not take effect")
+	}
+	if !pkt.Clone().IsMarkedDoNotRetransmit() {
+		t.Fatal("Clone() lost the do-not-retransmit flag")
+	}
+
+	data, err := pkt.ToBytes()
+	if err != nil {
+		t.Fatalf("ToBytes() error = %v", err)
+	}
+	roundTripped, err := PacketFromBytes(data)
+	if err != nil {
+		t.Fatalf("PacketFromBytes() error = %v", err)
+	}
+	if roundTripped.IsMarkedDoNotRetransmit() {
+		t.Fatal("do-not-retransmit leaked onto the wire")
+	}
+}
+
+// AppendPathHash must not overwrite the payload that follows Path in the parsed buffer.
+func TestAppendPathHash_DoesNotAliasPayload(t *testing.T) {
+	raw := []byte{MakeHeader(RouteTypeFlood, PayloadTypeGrpTxt, 0), 0x00, 1, 2, 3}
+	pkt, err := PacketFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.AppendPathHash([]byte{0xBC}) {
+		t.Fatal("append rejected")
+	}
+	if raw[2] != 1 || pkt.Payload[0] != 1 {
+		t.Fatalf("payload corrupted: raw=%x payload=%x", raw, pkt.Payload)
+	}
+}
