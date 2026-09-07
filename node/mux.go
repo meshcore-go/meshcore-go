@@ -110,12 +110,18 @@ func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr float32, rs
 // Incoming packets are delivered to each virtual radio that accepts them
 // via its PacketFilter. Outgoing packets are serialized through a shared
 // transmit queue to prevent concurrent writes to the modem.
+//
+// Like firmware's markSeen-on-send, the mux remembers every packet it
+// transmits; a copy that a neighbour bounces back is still delivered to the
+// virtual radios but flagged do-not-retransmit, so one radio never relays
+// its own traffic even when the originating and relaying Nodes differ.
 type RadioMux struct {
 	modem  Modem
 	log    *slog.Logger
 	errH   func(error)
 	mu     sync.RWMutex
 	radios []*virtualRadio
+	sent   meshcore.DedupCache
 
 	tx       *txEngine
 	done     chan struct{}
@@ -203,6 +209,9 @@ func NewRadioMux(modem Modem, opts ...MuxOption) *RadioMux {
 }
 
 func (m *RadioMux) enqueue(data []byte, priority uint8, delay time.Duration) bool {
+	if pkt, err := meshcore.PacketFromBytes(data); err == nil {
+		m.sent.MarkSeen(pkt)
+	}
 	return m.tx.enqueue(data, priority, delay)
 }
 
@@ -255,6 +264,9 @@ func (m *RadioMux) onData(data []byte, snr float32, rssi int8, hasSignalInfo boo
 	pkt.SNR = snr
 	pkt.RSSI = rssi
 	pkt.HasSignalInfo = hasSignalInfo
+	if m.sent.Contains(pkt) {
+		pkt.MarkDoNotRetransmit()
+	}
 
 	m.mu.RLock()
 	radios := make([]*virtualRadio, len(m.radios))

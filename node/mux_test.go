@@ -490,3 +490,36 @@ func TestMux_SharedQueueAcrossRadios(t *testing.T) {
 		t.Fatalf("expected 2 sent, got %d", len(sent))
 	}
 }
+
+// A packet one virtual radio sends must not be relayed by another radio on the
+// same modem when a neighbour bounces it back (firmware markSeen-on-send).
+func TestMux_BouncedOwnPacketIsMarkedDoNotRetransmit(t *testing.T) {
+	modem := &mockModem{}
+	mux := NewRadioMux(modem)
+	defer mux.Stop()
+	sender, relay := mux.NewRadio(), mux.NewRadio()
+
+	got := make(chan *meshcore.Packet, 2)
+	relay.SetDataHandler(func(p *meshcore.Packet) { got <- p })
+
+	own := muxFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{1, 2, 3})
+	if err := sender.SendData(own); err != nil {
+		t.Fatal(err)
+	}
+	bounced, _ := meshcore.PacketFromBytes(own)
+	bounced.AppendPathHash([]byte{0xBC})
+	raw, _ := bounced.ToBytes()
+	modem.inject(raw)
+	modem.inject(muxFloodPacket(meshcore.PayloadTypeGrpTxt, []byte{9, 9, 9}))
+
+	for i, wantMarked := range []bool{true, false} {
+		select {
+		case p := <-got:
+			if p.IsMarkedDoNotRetransmit() != wantMarked {
+				t.Fatalf("packet %d: IsMarkedDoNotRetransmit=%v, want %v", i, !wantMarked, wantMarked)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("packet %d not delivered", i)
+		}
+	}
+}
