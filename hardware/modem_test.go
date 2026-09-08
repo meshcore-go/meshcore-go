@@ -961,7 +961,7 @@ func TestRequest_DoesNotAdoptALateReply(t *testing.T) {
 		t.Fatalf("Battery: %v", err)
 	}
 	if mv != 3856 {
-		t.Errorf("battery = %d mV, want 3856 — the second request took the stale reply", mv)
+		t.Errorf("battery = %d mV, want 3856 - the second request took the stale reply", mv)
 	}
 }
 
@@ -1036,7 +1036,7 @@ func TestRequest_RecoversAfterAReplyIsLost(t *testing.T) {
 	}()
 	mv, err := m.Battery(context.Background())
 	if err != nil {
-		t.Fatalf("Battery after a lost reply: %v — the command stayed poisoned", err)
+		t.Fatalf("Battery after a lost reply: %v - the command stayed poisoned", err)
 	}
 	if mv != 3856 {
 		t.Errorf("battery = %d mV, want 3856", mv)
@@ -1056,7 +1056,7 @@ func TestRequest_IgnoresAnUnsolicitedTxBusyError(t *testing.T) {
 	}()
 	mv, err := m.Battery(context.Background())
 	if err != nil {
-		t.Fatalf("Battery: %v — an unsolicited tx-busy error was adopted", err)
+		t.Fatalf("Battery: %v - an unsolicited tx-busy error was adopted", err)
 	}
 	if mv != 3856 {
 		t.Errorf("battery = %d mV, want 3856", mv)
@@ -1066,7 +1066,7 @@ func TestRequest_IgnoresAnUnsolicitedTxBusyError(t *testing.T) {
 // TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms pins a deliberate
 // trade-off, not a desirable behaviour. Suppressing this adoption needs a mark
 // on the response code, and such a mark is never cleared when the reply is
-// simply lost — which the firmware does when its TX queue cannot flush —
+// simply lost - which the firmware does when its TX queue cannot flush -
 // leaving the command dead until reconnect. A stale reading of the same query
 // is bounded; a dead command is not. Reintroducing the mark trades back.
 func TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms(t *testing.T) {
