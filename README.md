@@ -26,6 +26,10 @@ meshcore-go/
     transport/                # Separate module (own go.mod)
       transport.go            # Shared read loop with frame resync
       serial.go, tcp.go       # Serial and TCP transports
+    sx12xx/                   # Separate module (own go.mod, brings in periph.io)
+      sx126x*.go, sx127x*.go  # SPI drivers for the SX126x and SX127x families
+      lbt.go                  # Listen-before-talk, current RSSI, AGC reset
+      modem.go                # Modem: adapts an SPI radio to node.Modem
   node/
     node.go                   # Node: identity, options, send helpers, lifecycle
     router.go                 # Flood/direct routing and forwarding policy
@@ -51,6 +55,9 @@ go get github.com/meshcore-go/meshcore-go
 # Transports are separate modules (they bring in go.bug.st/serial)
 go get github.com/meshcore-go/meshcore-go/companion/transport
 go get github.com/meshcore-go/meshcore-go/hardware/transport
+
+# SPI radios on a Pi hat are a separate module (brings in periph.io)
+go get github.com/meshcore-go/meshcore-go/hardware/sx12xx
 ```
 
 ## Quick Start
@@ -159,6 +166,36 @@ n := node.New(identity, radio,
 )
 ```
 
+### A node on an SPI radio (Pi hat)
+
+```go
+if _, err := host.Init(); err != nil { log.Fatal(err) }
+port, err := spireg.Open("SPI0.0")
+if err != nil { log.Fatal(err) }
+defer port.Close()
+
+opts := sx12xx.DefaultOpts
+opts.ResetPin, opts.BusyPin, opts.Dio1Pin = "GPIO25", "GPIO5", "GPIO12"
+opts.CSPin, opts.TxEnPin = "GPIO24", "GPIO27"
+opts.EnablePins = []string{"GPIO17", "GPIO16"}
+opts.UseDIO2AsRfSwitch = false
+opts.TCXOVoltage = sx12xx.TCXO1_8V
+
+radio, err := sx12xx.NewSX126x(port, &opts)
+if err != nil { log.Fatal(err) }
+
+modem, err := sx12xx.NewModem(radio,
+    &hardware.RadioConfig{FreqHz: 869_525_000, BwHz: 250_000, SF: 11, CR: 5},
+    sx12xx.WithTxPower(22))
+if err != nil { log.Fatal(err) }
+defer modem.Close()
+
+mux := node.NewRadioMux(modem, node.WithMuxAirtimeEstimator(modem.AirtimeEstimator()))
+n := node.New(identity, mux.NewRadio(), node.WithAirtimeEstimator(modem.AirtimeEstimator()))
+```
+
+The pin names are the board's, not the chip's: the values above are a Waveshare-style SX1262 hat on a Pi 4. Check your hat's schematic before running it.
+
 ## API Overview
 
 ### Core protocol (`meshcore`)
@@ -223,6 +260,38 @@ Firmware enables RX metadata by default, so `Connect` always pushes the modem's 
 `SendKissCommand` sends the standard KISS parameters (TXDELAY, PERSISTENCE, SLOTTIME, TXTAIL, FULLDUPLEX). The firmware defaults to a 500 ms TXDELAY and p-persistent CSMA with P=63 and 100 ms slots underneath the node's own scheduling. Commands longer than the firmware's 512-byte receive buffer return `ErrFrameTooLarge` instead of being silently dropped. `SetRadio`, `SetTxPower` and `Reboot` are answered with `HW_RESP_OK`, not the `cmd|0x80` code, and `GetRadio`/`GetTxPower` return the firmware's cached values, which are zero until the host sets them.
 
 The codec escapes type bytes as well as payload. Transport buffering allows up to 1,030 encoded bytes, separately from decoded frame bounds, so large escaped hardware responses survive fragmented reads. `LoRaAirtimeEstimator` uses the firmware preamble: 32 symbols at SF5–8 and 16 at higher spreading factors.
+
+### SPI radios (`hardware/sx12xx`)
+
+A separate module, because it brings in `periph.io/x/conn/v3`. It drives an SX126x (SX1261/1262/1268) or SX127x (SX1272/1276/77/78/79) directly over SPI, for Pi hats and similar boards with no MeshCore firmware in front of the radio.
+
+| Type | Description |
+|------|-------------|
+| `SX126x`, `SX127x` | Chip drivers: LoRa and (G)FSK configuration, transmit, receive, link metrics |
+| `Modem` | Adapts either chip to `node.Modem`; applies the MeshCore radio settings and gates transmissions |
+| `Opts`, `SX127xOpts` | Pin names (reset, busy, DIO, chip-select, RF switch, enables), SPI speed, TCXO, regulator |
+
+`NewModem` applies the firmware's settings rather than leaving them to the caller: the private sync word, an explicit header with CRC, no IQ inversion, a 255-byte payload length, and a preamble of 32 symbols at SF5-8 or 16 above that — the same rule `LoRaAirtimeEstimator` assumes.
+
+`SendData` reproduces `Dispatcher::checkSend`. Before transmitting it asks the radio whether a packet is arriving; while one is, it backs off for a randomised 120, 240 or 360 ms and asks again. Once the channel has read busy for longer than `CADFailMaxDuration` (4 seconds) it transmits anyway, because a receiver wedged on a stale flag would otherwise silence the node forever. On the SX126x the check is a preamble-detected or header-valid IRQ, latched with the same staleness windows the firmware derives from the modulation parameters; on the SX127x it is the live modem status. Transmitting out of continuous receive is the normal case: the driver drops to standby for the transmission and re-arms the receiver afterwards.
+
+`ResetAGC` is a full receiver reset, not just a power cycle of the analog front end: warm sleep, `Calibrate`, then image calibration for the operating band. That last step is not optional. `Calibrate` resets image calibration to the 902-928 MHz default, so a node anywhere else must recalibrate its own band immediately or go quietly deaf with no error raised — a 915 MHz node would never notice, an 868 MHz one would stop hearing. Calibration also drops the DIO2 RF-switch setting and the RX gain mode, so both are re-applied, the gain read back off the chip rather than assumed.
+
+`SetRxBoostedGain` trades a little standby current for sensitivity, and can be changed at runtime as well as set through `Opts.RxBoostedGain`. `WithCADEnabled` adds hardware channel-activity detection to the transmit gate, using the parameters Semtech recommends (four symbols, a detection peak of SF+13). Like the firmware, it is off by default: it costs a scan on every send, and packet detection alone covers the common case. It is SX126x-only; asking for it on an SX127x logs a warning and falls back to packet detection. `Stats` reports the lifetime counters — packets in and out, read failures, CRC drops, and packets lost to a slow consumer.
+
+The noise floor is always measured, as the firmware measures it in `loop()` regardless of settings, and `NoiseFloor` reports it for stats. Taking the radio off firmware means taking on the receive/transmit handover the KISS firmware does for us, and the firmware's dispatcher is single-threaded: it drains the receiver before it ever starts a transmit, and gates every path that leaves receive on `STATE_INT_READY`. The driver reproduces that. A packet that has landed but not yet been picked up is read out before a transmission or an AGC reset drops to standby, because re-arming the receiver clears the IRQ flags and the FIFO with it. Received packets are buffered between the chip and the consumer, so a handler that takes its time does not leave the receiver unserviced; `Stats().PacketsDropped` counts what a consumer too slow to keep up has cost, oldest first.
+
+A failed re-arm is the dangerous case: a transmission takes the radio out of receive, and if putting it back fails, the node goes deaf with nothing to notice. `InRecvMode` reports the state the firmware tracks as `isInRecvMode`, and the modem watches it on the firmware's own 8-second budget (`RecvWatchdogTimeout`, its `ERR_EVENT_STARTRX_TIMEOUT`); past that it reports the failure and re-arms, counting each recovery in `RecvRecoveries`. A non-zero count means transmissions are not restoring the receiver and the radio needs looking at.
+
+`WithInterferenceThreshold` decides whether it also gates transmission: with it set, the channel counts as busy while the instantaneous RSSI sits that many dB above the floor. The gate is off by default, as it is in firmware. `WithAGCResetInterval` periodically resets the receiver front-end, which reopens the floor measurement; it is off by default too.
+
+The floor starts unmeasured rather than at the -120 dBm bound, because the sampler only accepts readings below floor+14 dB: starting at -120 puts the window at -106, and on a hat whose ambient is around -82 dBm no sample is ever accepted, so the floor stays pinned and the interference gate reads busy forever. A round that gathers nothing reopens its window for the same reason. `NoiseFloor` clamps to -120 dBm on the way out and returns zero until the first round completes.
+
+Data handlers run synchronously on the receive goroutine, so a slow one costs packets: they queue in the driver's buffer and, once it is full, are dropped. `WithHandlerWatchdog` times each dispatch and counts the ones over its threshold in `HandlerSlow`, the same contract as the KISS modem's. It is off by default, so a zero from an unconfigured modem means "not measured", not "no slow handlers" — `Stats().PacketsDropped` tells you packets were lost, `HandlerSlow` tells you a handler was why. Drops are also warned periodically rather than per packet, so a consumer that never reads `Stats` still sees the loss.
+
+`Modem.NoiseFloor` and `Modem.PacketScore` report what a stats or packet-log consumer needs without it having to carry the radio config around; the score uses the spreading factor the radio is configured with and pairs with `node.RxDelayForScore`.
+
+Pass `modem.AirtimeEstimator()` to `node.WithMuxAirtimeEstimator` and `node.WithAirtimeEstimator` so the TX budget and relay timing match the radio's actual modulation.
 
 ### Node runtime (`node`)
 

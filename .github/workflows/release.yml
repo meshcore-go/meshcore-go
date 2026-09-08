@@ -28,12 +28,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           git tag "companion/transport/${VERSION}"
           git tag "hardware/transport/${VERSION}"
+          git tag "hardware/sx12xx/${VERSION}"
 
       - name: Push submodule tags
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git push origin "companion/transport/${VERSION}"
           git push origin "hardware/transport/${VERSION}"
+          git push origin "hardware/sx12xx/${VERSION}"
 
       - name: Create GitHub Release
         run: |
