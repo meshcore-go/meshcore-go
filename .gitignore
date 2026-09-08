@@ -41,3 +41,6 @@ CLAUDE.local.md
 *~
 *.swp
 *.swo
+
+# Local scratch / experiments
+scratchpad/

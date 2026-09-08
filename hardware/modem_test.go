@@ -18,6 +18,7 @@ type mockTransport struct {
 	frameH   func(*KissFrame)
 	errorH   func(error)
 	connectF func(ctx context.Context) error
+	onSend   func([]byte)
 	dead     chan struct{}
 	closed   atomic.Bool
 }
@@ -38,7 +39,11 @@ func (m *mockTransport) Close() error { m.closed.Store(true); return nil }
 func (m *mockTransport) Send(data []byte) error {
 	m.mu.Lock()
 	m.sent = append(m.sent, data)
+	h := m.onSend
 	m.mu.Unlock()
+	if h != nil {
+		h(data)
+	}
 	return nil
 }
 
@@ -62,8 +67,6 @@ func (m *mockTransport) injectFrame(f *KissFrame) {
 	}
 }
 
-// --- helpers ---
-
 func makeDataFrame(data []byte) *KissFrame {
 	return &KissFrame{Port: 0, Command: KISS_CMD_DATA, Data: data}
 }
@@ -75,8 +78,6 @@ func makeRxMetaFrame(snr, rssi int8) *KissFrame {
 		Data:    []byte{HW_RESP_RX_META, byte(snr), byte(rssi)},
 	}
 }
-
-// --- Tests ---
 
 func TestModem_SignalReportDisabled_ImmediateDispatch(t *testing.T) {
 	mt := newMockTransport()
@@ -111,15 +112,13 @@ func TestModem_SignalReportEnabled_DataThenMeta(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Inject a data frame — should be queued, not dispatched.
 	mt.injectFrame(makeDataFrame([]byte{0xAA}))
 	modem.Flush()
 	if len(received) != 0 {
 		t.Fatalf("data frame should be queued, got %d dispatched", len(received))
 	}
 
-	// Inject RX_META — should enrich and dispatch the queued frame.
-	// SNR byte -6 is quarter-dB on the wire, decoded to -1.5 dB.
+	// SNR byte -6 is quarter-dB on the wire: -1.5 dB.
 	mt.injectFrame(makeRxMetaFrame(-6, -80))
 	modem.Flush()
 	if len(received) != 2 {
@@ -151,10 +150,8 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Inject first data frame — queued.
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 
-	// Inject second data frame — first should flush with zero SNR/RSSI.
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	modem.Flush()
 
@@ -178,7 +175,7 @@ func TestModem_SignalReportEnabled_StaleFlush(t *testing.T) {
 		t.Errorf("stale frame data = %X, want 01", stale.Data)
 	}
 
-	// Now deliver meta for the second frame. SNR byte 5 (quarter-dB) = 1.25 dB.
+	// SNR byte 5 is quarter-dB on the wire: 1.25 dB.
 	mt.injectFrame(makeRxMetaFrame(5, -50))
 	modem.Flush()
 
@@ -216,7 +213,6 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Inject data frame — queued.
 	mt.injectFrame(makeDataFrame([]byte{0xFF}))
 
 	mu.Lock()
@@ -226,7 +222,6 @@ func TestModem_SignalReportEnabled_Timeout(t *testing.T) {
 		t.Fatalf("frame should be pending, got %d dispatched", count)
 	}
 
-	// Wait for the timeout (1s) + margin.
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	mu.Lock()
@@ -259,13 +254,9 @@ func TestModem_SignalReportEnabled_MetaWithoutPending(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Inject RX_META with no pending data frame — should not crash,
-	// and the HW frame should still be dispatched to frame handler.
 	mt.injectFrame(makeRxMetaFrame(-10, -90))
 	modem.Flush()
 
-	// The HW frame itself goes through dispatchFrame → frameHandler.
-	// But no data frame should be dispatched with enrichment.
 	for _, f := range received {
 		if f.Command == KISS_CMD_DATA {
 			t.Error("no data frame should be dispatched when meta arrives without pending")
@@ -282,7 +273,6 @@ func TestModem_SignalReportEnabled_NonDataNonMetaImmediate(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Non-data, non-RX_META HW frame should dispatch immediately even with signal report on.
 	hwFrame := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -313,7 +303,6 @@ func TestModem_ConnectSendsSignalReport(t *testing.T) {
 		t.Fatalf("expected 1 sent frame on connect, got %d", len(sent))
 	}
 
-	// Decode the sent frame and verify it's SET_SIGNAL_REPORT with 0x01.
 	frame, err := DecodeFrame(sent[0])
 	if err != nil {
 		t.Fatalf("DecodeFrame error: %v", err)
@@ -332,8 +321,6 @@ func TestModem_ConnectSendsSignalReport(t *testing.T) {
 	}
 }
 
-// Firmware defaults signal report on, so a modem that does not want RX_META
-// must say so on every connect.
 func TestModem_ConnectSendsSignalReportOff_WhenDisabled(t *testing.T) {
 	mt := newMockTransport()
 	modem := NewKissModem(mt) // no WithSignalReport
@@ -368,13 +355,11 @@ func TestModem_SetSignalReport(t *testing.T) {
 		t.Fatalf("expected 2 sent frames, got %d", len(sent))
 	}
 
-	// First: enable (0x01)
 	frame, _ := DecodeFrame(sent[0])
 	if frame.Data[0] != HW_CMD_SET_SIGNAL_REPORT || frame.Data[1] != 0x01 {
 		t.Errorf("enable frame: subcmd=0x%02X val=0x%02X, want 0x19/0x01", frame.Data[0], frame.Data[1])
 	}
 
-	// Second: disable (0x00)
 	frame, _ = DecodeFrame(sent[1])
 	if frame.Data[0] != HW_CMD_SET_SIGNAL_REPORT || frame.Data[1] != 0x00 {
 		t.Errorf("disable frame: subcmd=0x%02X val=0x%02X, want 0x19/0x00", frame.Data[0], frame.Data[1])
@@ -410,7 +395,6 @@ func TestModem_HwResponseHandler(t *testing.T) {
 		hwCalls = append(hwCalls, subCmd)
 	})
 
-	// Inject a PING response HW frame.
 	pingResp := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -436,7 +420,6 @@ func TestModem_SignalReportEnabled_RxMetaAlsoFiresHwHandler(t *testing.T) {
 		hwCalls++
 	})
 
-	// Queue a data frame, then deliver meta.
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeRxMetaFrame(-3, -70))
 	modem.Flush()
@@ -455,20 +438,16 @@ func TestModem_SignalReportEnabled_MetaShortPayload(t *testing.T) {
 		received = append(received, f)
 	})
 
-	// Queue data frame.
 	mt.injectFrame(makeDataFrame([]byte{0xBB}))
 
-	// Inject RX_META with only 1 byte of data (missing RSSI) — should still
-	// dispatch the pending frame but without enrichment.
 	shortMeta := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
-		Data:    []byte{HW_RESP_RX_META}, // only sub-command, no SNR/RSSI
+		Data:    []byte{HW_RESP_RX_META},
 	}
 	mt.injectFrame(shortMeta)
 	modem.Flush()
 
-	// The pending frame should be dispatched (without enrichment).
 	dataFrames := 0
 	for _, f := range received {
 		if f.Command == KISS_CMD_DATA {
@@ -495,13 +474,10 @@ func TestModem_Close_CancelsPendingTimer(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Queue a data frame (starts timer).
 	mt.injectFrame(makeDataFrame([]byte{0xCC}))
 
-	// Close before timeout fires.
 	modem.Close()
 
-	// Wait past the timeout to verify the timer was cancelled.
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	mu.Lock()
@@ -521,7 +497,6 @@ func TestModem_ErrorHandler(t *testing.T) {
 		errReceived = err
 	})
 
-	// Inject a malformed HW frame (SETHARDWARE with empty data).
 	bad := &KissFrame{
 		Port:    0,
 		Command: KISS_CMD_SETHARDWARE,
@@ -536,9 +511,6 @@ func TestModem_ErrorHandler(t *testing.T) {
 }
 
 func TestModem_MultipleDataThenMeta(t *testing.T) {
-	// Simulates rapid-fire: data1, data2, data3, meta.
-	// data1 flushed (stale when data2 arrives), data2 flushed (stale when data3 arrives),
-	// data3 enriched by meta.
 	mt := newMockTransport()
 	modem := NewKissModem(mt, WithSignalReport(true))
 
@@ -563,13 +535,11 @@ func TestModem_MultipleDataThenMeta(t *testing.T) {
 		t.Fatalf("expected 3 DATA frames and RX_META, got %d", len(received))
 	}
 
-	// First two: stale, zero SNR/RSSI
 	for i := range 2 {
 		if received[i].SNR != 0 || received[i].RSSI != 0 {
 			t.Errorf("frame %d: expected zero SNR/RSSI, got %g/%d", i, received[i].SNR, received[i].RSSI)
 		}
 	}
-	// Third: enriched
 	if received[2].SNR != 2.5 || received[2].RSSI != -40 {
 		t.Errorf("frame 2: expected SNR=2.5 RSSI=-40, got %g/%d", received[2].SNR, received[2].RSSI)
 	}
@@ -633,7 +603,6 @@ func TestModem_HandlerWorkers(t *testing.T) {
 		mt.injectFrame(makeDataFrame([]byte{byte(i)}))
 	}
 	modem.Flush()
-	// Give worker pool time to process
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
@@ -664,7 +633,6 @@ func TestModem_HandlerWatchdog(t *testing.T) {
 
 func TestModem_Stats_DroppedFrames(t *testing.T) {
 	mt := newMockTransport()
-	// Use tiny inbound buffer to force drops
 	modem := NewKissModem(mt, WithInboundBuffer(1))
 
 	// Block the drain goroutine by setting a slow handler
@@ -672,12 +640,9 @@ func TestModem_Stats_DroppedFrames(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	// Inject first frame (fills the buffer while drain is processing)
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
-	// Give drain time to pick up the first frame and start blocking
 	time.Sleep(10 * time.Millisecond)
 
-	// Fill buffer and force drops
 	for i := range 5 {
 		mt.injectFrame(makeDataFrame([]byte{byte(i + 2)}))
 	}
@@ -706,7 +671,6 @@ func TestModem_Stats_MetaTimeout(t *testing.T) {
 
 	mt.injectFrame(makeDataFrame([]byte{0xAA}))
 
-	// Wait for timeout
 	time.Sleep(rxMetaTimeout + 200*time.Millisecond)
 
 	stats := modem.Stats()
@@ -722,7 +686,6 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 
 	modem.SetFrameHandler(func(f *KissFrame) {})
 
-	// Two data frames back-to-back — first one gets replaced (misattributed)
 	mt.injectFrame(makeDataFrame([]byte{0x01}))
 	mt.injectFrame(makeDataFrame([]byte{0x02}))
 	modem.Flush()
@@ -733,9 +696,8 @@ func TestModem_Stats_MetaMisattributed(t *testing.T) {
 	}
 }
 
-// sendAndAwait runs SendData (which blocks under TX flow control) in a
-// goroutine, waits until the modem has marked the TX pending, then delivers the
-// given hardware response frame and returns SendData's result.
+// sendAndAwait runs the blocking SendData in a goroutine, delivers resps once
+// the TX is pending, and returns SendData's result.
 func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissFrame) error {
 	t.Helper()
 	errCh := make(chan error, 1)
@@ -761,7 +723,6 @@ func sendAndAwait(t *testing.T, m *KissModem, mt *mockTransport, resps ...*KissF
 	}
 }
 
-// TX_DONE with result byte 0x01 = success → SendData returns nil.
 func TestModem_TxFlowControl_DoneSuccess(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -771,8 +732,6 @@ func TestModem_TxFlowControl_DoneSuccess(t *testing.T) {
 	}
 }
 
-// TX_DONE with result byte 0x00 = failure (radio busy / startSendRaw failed /
-// airtime timeout, firmware 1.16+) → SendData returns ErrTxFailed.
 func TestModem_TxFlowControl_DoneFailure(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -782,8 +741,6 @@ func TestModem_TxFlowControl_DoneFailure(t *testing.T) {
 	}
 }
 
-// 1.16 baseline: a TX_DONE with no result byte is not a guaranteed success, so
-// it is treated as a failed transmit (no pre-1.16 "missing byte = success").
 func TestModem_TxFlowControl_DoneMissingByte(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -803,8 +760,6 @@ func TestModem_HwError_TxBusyDoesNotResolveSend(t *testing.T) {
 	}
 }
 
-// Any other error code is reported to the error handler (it belongs to a
-// command reply, not to a transmit) and counted.
 func TestModem_HwError_Reported(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt)
@@ -830,7 +785,6 @@ func TestModem_HwError_Reported(t *testing.T) {
 	}
 }
 
-// Output backpressure may precede a successful TX_DONE for the accepted frame.
 func TestModem_TxFlowControl_Busy(t *testing.T) {
 	mt := newMockTransport()
 	m := NewKissModem(mt, WithTxFlowControl(2*time.Second))
@@ -884,5 +838,263 @@ func TestModem_CloseFromHandler(t *testing.T) {
 				t.Error("transport not closed")
 			}
 		})
+	}
+}
+
+func makeHwRespFrame(subCmd byte, payload ...byte) *KissFrame {
+	return &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: append([]byte{subCmd}, payload...)}
+}
+
+// connectedModem returns a started modem plus its transport.
+func connectedModem(t *testing.T) (*KissModem, *mockTransport) {
+	t.Helper()
+	mt := newMockTransport()
+	m := NewKissModem(mt)
+	if err := m.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { m.Close() })
+	return m, mt
+}
+
+func TestRequest_ReturnsTheMatchingReply(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F)) // 3856 mV
+	}()
+
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+// The firmware sends signed tenths of a degree, so a uint16 read would be wrong
+// in both scale and sign below zero.
+func TestMCUTemp_DecodesSignedTenths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  int16
+		want float32
+	}{
+		{"positive", 235, 23.5},
+		{"below freezing", -55, -5.5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, mt := connectedModem(t)
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_MCU_TEMP),
+					byte(uint16(tc.raw)), byte(uint16(tc.raw)>>8)))
+			}()
+			got, err := m.MCUTemp(context.Background())
+			if err != nil {
+				t.Fatalf("MCUTemp: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("MCUTemp = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoiseFloor_DecodesNegativeDBm(t *testing.T) {
+	m, mt := connectedModem(t)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		dbm := int16(-85)
+		raw := uint16(dbm)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_NOISE_FLOOR), byte(raw), byte(raw>>8)))
+	}()
+	got, err := m.NoiseFloor(context.Background())
+	if err != nil {
+		t.Fatalf("NoiseFloor: %v", err)
+	}
+	if got != -85 {
+		t.Errorf("NoiseFloor = %d, want -85", got)
+	}
+}
+
+// A reply that never arrives must fail, not hand back a stale or zero reading:
+// silently returning the previous poll's numbers is what callers had to do for
+// themselves before, and it cannot be distinguished from a fresh value.
+func TestRequest_TimesOutRatherThanReturningStale(t *testing.T) {
+	m, _ := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := m.Battery(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Battery with no reply = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v to give up", elapsed)
+	}
+}
+
+// A late reply belongs to the request that timed out, not to the next one.
+func TestRequest_DoesNotAdoptALateReply(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+	// The abandoned reply arrives and is dispatched while the modem is idle,
+	// which is the window the stale mark can actually protect: once a new
+	// request has armed, KISS offers nothing to tell its reply from this one.
+	mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x00, 0x01))
+	time.Sleep(30 * time.Millisecond)
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856 — the second request took the stale reply", mv)
+	}
+}
+
+func TestRequest_SurfacesHardwareError(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HW_RESP_ERROR, HW_ERR_NO_CALLBACK))
+	}()
+	_, err := m.MCUTemp(context.Background())
+	if !errors.Is(err, ErrHwRequestFailed) {
+		t.Fatalf("MCUTemp on a board that cannot read it = %v, want ErrHwRequestFailed", err)
+	}
+}
+
+func TestFirmwareCounters_DecodesThreeUint32(t *testing.T) {
+	m, mt := connectedModem(t)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_STATS),
+			0x01, 0, 0, 0, 0x02, 0, 0, 0, 0x03, 0, 0, 0))
+	}()
+	got, err := m.FirmwareCounters(context.Background())
+	if err != nil {
+		t.Fatalf("FirmwareCounters: %v", err)
+	}
+	if got != (FirmwareStats{PacketsRecv: 1, PacketsSent: 2, PacketsErrors: 3}) {
+		t.Errorf("counters = %+v", got)
+	}
+}
+
+// The pre-existing OnHwResponse handlers must keep firing alongside Request.
+func TestRequest_DoesNotStarveOnHwResponseHandlers(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	seen := make(chan []byte, 1)
+	m.OnHwResponse(HwResp(HW_CMD_GET_BATTERY), func(_ byte, data []byte) {
+		select {
+		case seen <- data:
+		default:
+		}
+	})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	if _, err := m.Battery(context.Background()); err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Error("registered OnHwResponse handler never fired")
+	}
+}
+
+func TestRequest_RecoversAfterAReplyIsLost(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	// The firmware drops responses when its TX queue is full, so a request can
+	// time out with no reply ever arriving.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery after a lost reply: %v — the command stayed poisoned", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+func TestRequest_IgnoresAnUnsolicitedTxBusyError(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	// The firmware raises TX_BUSY from its data path, unprompted; it can never
+	// be the answer to a query, and adopting it fails an unrelated request.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HW_RESP_ERROR, HW_ERR_TX_BUSY))
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v — an unsolicited tx-busy error was adopted", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+// TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms pins a deliberate
+// trade-off, not a desirable behaviour. Suppressing this adoption needs a mark
+// on the response code, and such a mark is never cleared when the reply is
+// simply lost — which the firmware does when its TX queue cannot flush —
+// leaving the command dead until reconnect. A stale reading of the same query
+// is bounded; a dead command is not. Reintroducing the mark trades back.
+func TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+
+	// Dispatched after the second request has armed, which is the window
+	// nothing on the wire can disambiguate.
+	mt.mu.Lock()
+	mt.onSend = func([]byte) {
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x00, 0x01))
+	}
+	mt.mu.Unlock()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 256 {
+		t.Errorf("battery = %d mV, want 256: the stale reply is adopted here by design", mv)
 	}
 }

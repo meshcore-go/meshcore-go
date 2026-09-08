@@ -645,7 +645,6 @@ func TestCommandsToBytes(t *testing.T) {
 		{
 			name: "set default flood scope multibyte name truncated on rune boundary",
 			build: func() []byte {
-				// "A" + 15×"€" = 1 + 45 = 46 bytes; the 30-byte cut lands mid-"€".
 				return SetDefaultFloodScopeCommand{
 					Name: "A" + strings.Repeat("€", 15),
 					Key:  []byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f},

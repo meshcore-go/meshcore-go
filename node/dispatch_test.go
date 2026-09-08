@@ -8,7 +8,6 @@ import (
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
 
-// A flood packet a handler claims for this node is delivered but not re-flooded.
 func TestNode_FloodConsumedNotRelayed(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(0x01), radio, WithAllowForwardHandler(func(*meshcore.Packet) bool { return true }))
@@ -50,7 +49,6 @@ func TestNode_FloodRelayedWhenNotConsumed(t *testing.T) {
 	}
 }
 
-// Handlers run before the relay decision, so a handler sees the packet either way.
 func TestNode_FloodDeliveredBeforeRelay(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(0x01), radio, WithAllowForwardHandler(func(pkt *meshcore.Packet) bool {
@@ -68,7 +66,6 @@ func TestNode_FloodDeliveredBeforeRelay(t *testing.T) {
 	}
 }
 
-// A flood packet is held for the configured rx delay before it is routed.
 func TestNode_RxDelayHoldsFlood(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(1), radio,
@@ -91,8 +88,6 @@ func TestNode_RxDelayHoldsFlood(t *testing.T) {
 	}
 }
 
-// Below the 50ms threshold the packet is routed inline, and direct packets are
-// never held regardless of the hook.
 func TestNode_RxDelayImmediateCases(t *testing.T) {
 	identity := seedIdentity(1)
 	tests := []struct {
@@ -141,7 +136,6 @@ func multiAckPacket(path []byte, crc []byte, remaining uint8) []byte {
 	return makeDirectPacket(meshcore.PayloadTypeMultiPart, path, payload)
 }
 
-// A multipart ACK addressed to us must reach the ACK tracker, not just handlers.
 func TestNode_MultiPartACKDeliveredLocally(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(1), radio)
@@ -159,8 +153,6 @@ func TestNode_MultiPartACKDeliveredLocally(t *testing.T) {
 	}
 }
 
-// With a receive delay set, held and prompt packets must still be dispatched one
-// at a time — the firmware drains its inbound queue on a single loop.
 func TestNode_RxDelaySerializesDispatch(t *testing.T) {
 	radio := &mockRadio{}
 	n := New(seedIdentity(1), radio,
@@ -192,7 +184,6 @@ func TestNode_RxDelaySerializesDispatch(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// One held packet, then five prompt ones that would land on top of it.
 	radio.inject(makeFloodPacket(meshcore.PayloadTypeTxtMsg, []byte{0x01}))
 	for i := range 5 {
 		radio.inject(makeFloodPacket(meshcore.PayloadTypeTxtMsg, []byte{0x02, byte(i)}))

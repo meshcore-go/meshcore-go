@@ -589,9 +589,7 @@ func TestPacketValidate(t *testing.T) {
 	}
 }
 
-// TestSNRFromWire verifies the quarter-dB wire decode used at every SNR ingest
-// point. MeshCore firmware sends (int8)round(snr_dB * 4); dividing by 4 recovers
-// real dB. See SNRFromWire / PathSNRdB.
+// MeshCore firmware sends (int8)round(snr_dB * 4).
 func TestSNRFromWire(t *testing.T) {
 	cases := []struct {
 		wire int8
@@ -929,7 +927,6 @@ func TestPacket_DoNotRetransmit(t *testing.T) {
 	}
 }
 
-// AppendPathHash must not overwrite the payload that follows Path in the parsed buffer.
 func TestAppendPathHash_DoesNotAliasPayload(t *testing.T) {
 	raw := []byte{MakeHeader(RouteTypeFlood, PayloadTypeGrpTxt, 0), 0x00, 1, 2, 3}
 	pkt, err := PacketFromBytes(raw)

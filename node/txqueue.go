@@ -13,9 +13,7 @@ type txEntry struct {
 	seq         uint64
 }
 
-// txQueue is a bounded priority queue for outbound packets.
-// Lower priority number = higher priority. Within the same priority level,
-// entries are dequeued in FIFO order (by insertion sequence number).
+// txQueue is a bounded priority queue for outbound packets, FIFO within a priority level.
 type txQueue struct {
 	entries []txEntry
 	max     int
@@ -59,7 +57,6 @@ func (q *txQueue) readyIdx(now time.Time) int {
 	return best
 }
 
-// peek returns the highest-priority ready entry, or nil.
 func (q *txQueue) peek(now time.Time) *txEntry {
 	i := q.readyIdx(now)
 	if i < 0 {

@@ -56,7 +56,6 @@ func TestNewChannelFromHashtag(t *testing.T) {
 	if ch.Name != "#general" {
 		t.Errorf("Name = %q, want %q", ch.Name, "#general")
 	}
-	// Already normalized
 	ch2 := NewChannelFromHashtag("#general")
 	if ch2.Name != "#general" {
 		t.Errorf("Name = %q, want %q", ch2.Name, "#general")

@@ -38,6 +38,28 @@ jobs:
             exit 1
           fi
 
+  test-sx12xx:
+    name: Test SX12xx
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hardware/sx12xx
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hardware/sx12xx/go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race ./...
+
   test-transport:
     name: Test Transport
     runs-on: ubuntu-latest

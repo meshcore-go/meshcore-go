@@ -28,9 +28,7 @@ type CompanionModem struct {
 	unsubscribe func()
 }
 
-// NewCompanionModem creates a CompanionModem backed by the given Client.
-// The supplied context governs the lifetime of outbound send operations;
-// cancel it (or call Close) to unblock any pending sends.
+// NewCompanionModem creates a CompanionModem backed by the given Client, with ctx bounding outbound sends.
 func NewCompanionModem(ctx context.Context, c *Client) *CompanionModem {
 	ctx, cancel := context.WithCancel(ctx)
 	m := &CompanionModem{
@@ -60,9 +58,7 @@ func (m *CompanionModem) SendData(data []byte) error {
 	return m.client.SendRawPacket(m.ctx, m.Priority, data)
 }
 
-// SetDataHandler registers the callback invoked for each incoming raw
-// mesh packet. The handler receives the packet bytes, SNR, and RSSI
-// exactly as reported by the firmware.
+// SetDataHandler registers the callback invoked for each incoming raw mesh packet.
 func (m *CompanionModem) SetDataHandler(h func(data []byte, snr float32, rssi int8, hasSignalInfo bool)) {
 	m.mu.Lock()
 	m.dataH = h

@@ -102,13 +102,11 @@ func AdvertAppDataFromBytes(data []byte) (*AdvertAppData, error) {
 	advertAppData := &AdvertAppData{}
 	buffer := bytes.NewBuffer(data)
 
-	// Read Flags
 	flags, flagsErr := buffer.ReadByte()
 	if flagsErr != nil {
 		return nil, flagsErr
 	}
 
-	// Parse type from lower 4 bits of flags
 	switch flags & 0x0F {
 	case AdvertTypeNone:
 		advertAppData.Type = "NONE"
@@ -122,7 +120,6 @@ func AdvertAppDataFromBytes(data []byte) (*AdvertAppData, error) {
 		advertAppData.Type = "SENSOR"
 	}
 
-	// Parse lat lon
 	if flags&AdvertLatLonMask > 0 {
 		advertAppData.HasLocation = true
 		if err := binary.Read(buffer, binary.LittleEndian, &advertAppData.Lat); err != nil {
@@ -146,7 +143,6 @@ func AdvertAppDataFromBytes(data []byte) (*AdvertAppData, error) {
 		}
 	}
 
-	// parse name (remainder of app data)
 	if flags&AdvertNameMask > 0 {
 		advertAppData.Name = buffer.String()
 	}
@@ -261,7 +257,6 @@ func (a *Advert) Sign(privateKey ed25519.PrivateKey) {
 }
 
 // SignWith signs the advert with a LocalIdentity (seed or expanded-key based).
-// Prefer this over Sign: an expanded-key identity has no usable seed.
 func (a *Advert) SignWith(id LocalIdentity) {
 	a.Signature = id.Sign(a.signedData())
 }

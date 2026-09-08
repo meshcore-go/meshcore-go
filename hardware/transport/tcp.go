@@ -9,35 +9,28 @@ import (
 	"time"
 )
 
-// DefaultTCPKeepAlivePeriod is the default keepalive idle/probe interval
-// when TCPConfig.KeepAlivePeriod is zero. Chosen to fail half-open
-// connections within roughly a couple of minutes on most stacks while
-// remaining gentle on the link.
+// DefaultTCPKeepAlivePeriod is the keepalive idle/probe interval used when
+// TCPConfig.KeepAlivePeriod is zero.
 const DefaultTCPKeepAlivePeriod = 15 * time.Second
 
-// DefaultTCPReadIdleTimeout is the default per-read deadline. If no bytes
-// arrive within this window, the read loop reports an error and exits,
-// closing Dead() so callers can reconnect. Set TCPConfig.ReadIdleTimeout
-// to a non-zero value to override; set to a negative value to disable.
+// DefaultTCPReadIdleTimeout is the per-read deadline used when
+// TCPConfig.ReadIdleTimeout is zero.
 const DefaultTCPReadIdleTimeout = 60 * time.Second
 
-// DefaultTCPWriteTimeout bounds how long Send will wait for the kernel
-// send buffer to drain before treating the peer as stalled. Set
-// TCPConfig.WriteTimeout to a non-zero value to override; set to a
-// negative value to disable.
+// DefaultTCPWriteTimeout bounds a Send's wait on the kernel send buffer when
+// TCPConfig.WriteTimeout is zero.
 const DefaultTCPWriteTimeout = 10 * time.Second
 
 type TCPConfig struct {
 	Address string
-	// KeepAlivePeriod controls SO_KEEPALIVE idle/probe interval. Zero uses
-	// DefaultTCPKeepAlivePeriod. Negative disables keepalive entirely.
+	// KeepAlivePeriod is the SO_KEEPALIVE idle/probe interval; zero uses the
+	// default, negative disables keepalive.
 	KeepAlivePeriod time.Duration
-	// ReadIdleTimeout is the maximum time the read loop will wait for
-	// inbound bytes before treating the connection as dead. Zero uses
-	// DefaultTCPReadIdleTimeout. Negative disables the idle timeout.
+	// ReadIdleTimeout is the longest wait for inbound bytes before the
+	// connection is dead; zero uses the default, negative disables it.
 	ReadIdleTimeout time.Duration
-	// WriteTimeout bounds how long a single Send may wait for the kernel
-	// send buffer. Zero uses DefaultTCPWriteTimeout. Negative disables.
+	// WriteTimeout bounds a single Send's wait on the kernel send buffer;
+	// zero uses the default, negative disables it.
 	WriteTimeout time.Duration
 }
 
@@ -125,9 +118,8 @@ func (t *TCPTransport) Send(data []byte) error {
 	return writeRaw(conn, data)
 }
 
-// makeErrorGetter returns an error-handler getter that wraps idle-timeout
-// errors with a clearer message. The wrapping happens inside the getter
-// so the live handler is read each time (race-safe with SetErrorHandler).
+// makeErrorGetter wraps idle-timeout errors, reading the live handler each
+// call so SetErrorHandler stays race-free.
 func (t *TCPTransport) makeErrorGetter(idle time.Duration) func() ErrorHandler {
 	if idle <= 0 {
 		return t.errorHandler

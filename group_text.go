@@ -83,7 +83,6 @@ func (g *GroupText) DecryptStruct(channelKey []byte) (*GroupTextPayload, error) 
 	msg := string(bytes.TrimRight(plaintext[5:], "\x00"))
 	sender, text, _ := strings.Cut(msg, ": ")
 	if text == "" {
-		// No separator found; treat entire string as text
 		text = sender
 		sender = ""
 	}

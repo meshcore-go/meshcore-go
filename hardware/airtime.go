@@ -2,11 +2,8 @@ package hardware
 
 import "math"
 
-// LoRaAirtimeEstimator returns an airtime estimator function for the given
-// radio configuration. The returned function computes the LoRa time-on-air
-// in milliseconds for a packet of the given byte length.
-//
-// config.CR may be 1..4 or 5..8 (raw denominator).
+// LoRaAirtimeEstimator returns a function giving the LoRa time-on-air in
+// milliseconds for a packet of the given byte length.
 func LoRaAirtimeEstimator(config *RadioConfig) func(packetLen int) uint32 {
 	sf := float64(config.SF)
 	bw := float64(config.BwHz)

@@ -295,7 +295,7 @@ func TestTxEngine_Stats_BusyRequeued(t *testing.T) {
 	e := newTxEngine(func(data []byte) error {
 		attempts++
 		if attempts == 1 {
-			return ErrTxQueueFull // first attempt fails with retryable error
+			return ErrTxQueueFull
 		}
 		return nil
 	}, done, withTxRetryable(func(err error) bool {
@@ -343,11 +343,9 @@ func TestTxEngine_Stats_QueueRejected(t *testing.T) {
 		return nil
 	}, done, withTxMaxQueue(2))
 
-	// Fill queue
 	e.enqueue([]byte{0x01}, PrioritySend, 0)
 	e.enqueue([]byte{0x02}, PrioritySend, 0)
 
-	// This should be rejected
 	ok := e.enqueue([]byte{0x03}, PrioritySend, 0)
 	if ok {
 		t.Error("expected enqueue to fail (queue full)")

@@ -28,7 +28,6 @@ func TestPacketScore(t *testing.T) {
 	}
 }
 
-// A stronger packet must never score below a weaker one at the same length.
 func TestPacketScoreMonotonic(t *testing.T) {
 	prev := -1.0
 	for snr := -20.0; snr <= 15; snr += 0.5 {

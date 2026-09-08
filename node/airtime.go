@@ -13,8 +13,7 @@ const (
 )
 
 // AirtimeEstimator returns the estimated airtime in milliseconds for a packet
-// of the given byte length. Implementations typically compute this from the
-// radio's spreading factor, bandwidth, and coding rate (LoRa time-on-air).
+// of the given byte length.
 type AirtimeEstimator func(packetLen int) uint32
 
 type airtimeBudget struct {
@@ -61,9 +60,7 @@ func (b *airtimeBudget) refill(now time.Time) {
 	b.lastUpdate = now
 }
 
-// canSend checks if there is enough budget to transmit a packet of the given
-// estimated airtime. Returns true if budget permits, false otherwise along with
-// the estimated delay until the budget refills enough.
+// canSend reports whether budget covers estAirtimeMs, and if not, the wait until it does.
 func (b *airtimeBudget) canSend(estAirtimeMs uint32) (ok bool, waitMs float64) {
 	needed := float64(estAirtimeMs) / float64(minTxBudgetAirtimeDiv)
 	if b.txBudgetMs >= needed {
@@ -86,8 +83,7 @@ func (b *airtimeBudget) deduct(actualMs uint64) {
 	b.totalAirtimeMs += actualMs
 }
 
-// nextTxDelay returns how long to wait before budget recovers to the minimum
-// reserve. Returns 0 if budget is sufficient.
+// nextTxDelay returns how long until budget recovers to the minimum reserve.
 func (b *airtimeBudget) nextTxDelay() time.Duration {
 	if b.txBudgetMs >= minTxBudgetReserveMs {
 		return 0

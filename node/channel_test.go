@@ -101,7 +101,6 @@ func TestChannelTable_FindByHashMiss(t *testing.T) {
 func TestChannelTable_FindByHashReturnsAll(t *testing.T) {
 	ct := newChannelTable(DefaultMaxChannels)
 
-	// Two channels collide on the 1-byte hash.
 	ch1 := testChannel("alpha")
 	ch2 := testChannel("beta")
 	ch2.Hash = ch1.Hash // force collision

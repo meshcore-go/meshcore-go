@@ -593,7 +593,6 @@ func (c *Client) ImportPrivateKey(ctx context.Context, key [64]byte) error {
 	return err
 }
 
-// sendExpectSent sends a command acked with SENT.
 func (c *Client) sendExpectSent(ctx context.Context, cmd []byte) error {
 	_, err := c.sendAndWait(ctx, cmd, companion.RespSent, companion.RespOk, companion.RespErr)
 	return err
@@ -682,7 +681,7 @@ func (c *Client) SendBinaryReq(ctx context.Context, peer meshcore.Identity, data
 	return c.sendExpectSent(ctx, cmd.ToBytes())
 }
 
-// FactoryReset performs a factory reset. The device reboots after this.
+// FactoryReset performs a factory reset; the device reboots afterwards.
 func (c *Client) FactoryReset() error {
 	return c.send(companion.FactoryResetCommand{}.ToBytes())
 }
@@ -821,7 +820,7 @@ func (c *Client) SendChannelDataFlood(ctx context.Context, channelIdx byte, data
 	return err
 }
 
-// Reboot reboots the device. Does not wait for a response.
+// Reboot reboots the device without waiting for a response.
 func (c *Client) Reboot() error {
 	return c.send(companion.RebootCommand{}.ToBytes())
 }

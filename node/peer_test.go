@@ -266,7 +266,6 @@ func TestPeerTable_SetOutPath(t *testing.T) {
 
 	key := id.PublicKey()
 
-	// Set a path with hash size
 	ok := pt.SetOutPath(key, []byte{0xAA, 0xBB}, 2)
 	if !ok {
 		t.Fatal("SetOutPath returned false")
@@ -310,14 +309,12 @@ func TestPeerTable_SetOutPath_NilClearsPath(t *testing.T) {
 
 	key := id.PublicKey()
 
-	// Set a path first
 	pt.SetOutPath(key, []byte{0x01, 0x02}, 1)
 	p := pt.Lookup(key)
 	if p.OutPath == nil || p.OutPathHashSize == 0 {
 		t.Fatal("precondition: path should be set")
 	}
 
-	// Clear with nil
 	pt.SetOutPath(key, nil)
 	p = pt.Lookup(key)
 	if p.OutPath != nil {
@@ -336,14 +333,12 @@ func TestPeerTable_SetOutPath_HashSizePreserved(t *testing.T) {
 
 	key := id.PublicKey()
 
-	// Set path with hash size 2
 	pt.SetOutPath(key, []byte{0xAA, 0xBB, 0xCC, 0xDD}, 2)
 	p := pt.Lookup(key)
 	if p.OutPathHashSize != 2 {
 		t.Fatalf("OutPathHashSize = %d, want 2", p.OutPathHashSize)
 	}
 
-	// Update path without specifying hash size — should preserve existing
 	pt.SetOutPath(key, []byte{0x11, 0x22})
 	p = pt.Lookup(key)
 	if p.OutPathHashSize != 2 {
@@ -415,14 +410,12 @@ func TestPeerTable_LearnedPathsOnly(t *testing.T) {
 	id := peerIdentity(0x20)
 	pathHashes := []byte{0xAA, 0xBB}
 
-	// Default mode: an advert's reverse path populates OutPath.
 	def := NewPeerTable(10)
 	def.Update(makeSignedAdvert(id, 100, "x"), 0, 0, false, pathHashes)
 	if p := def.Lookup(id.PublicKey()); p == nil || len(p.OutPath) == 0 {
 		t.Error("default mode: expected OutPath to be set from the advert path")
 	}
 
-	// learnedPathsOnly: the advert path is ignored.
 	lp := NewPeerTable(10)
 	lp.learnedPathsOnly = true
 	lp.Update(makeSignedAdvert(id, 100, "x"), 0, 0, false, pathHashes)
@@ -434,7 +427,6 @@ func TestPeerTable_LearnedPathsOnly(t *testing.T) {
 		t.Errorf("learnedPathsOnly: OutPath = %x, want empty (advert path must be ignored)", p.OutPath)
 	}
 
-	// SetOutPath still applies an explicitly learned path.
 	if !lp.SetOutPath(id.PublicKey(), pathHashes) {
 		t.Fatal("SetOutPath returned false")
 	}
@@ -443,8 +435,6 @@ func TestPeerTable_LearnedPathsOnly(t *testing.T) {
 	}
 }
 
-// The fix: WithLearnedPathsOnly must survive WithMaxPeers replacing the peer
-// table, regardless of the order the options are passed.
 func TestNode_LearnedPathsOnly_OrderIndependent(t *testing.T) {
 	id := peerIdentity(0x21)
 	orders := map[string][]Option{

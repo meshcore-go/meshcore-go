@@ -21,11 +21,9 @@ type PacketHandler func(pkt *meshcore.Packet)
 type RetransmitDelayFunc func(packetLen int, estAirtimeMs uint32) time.Duration
 
 // RxDelayFunc returns how long to hold a received flood packet before routing it.
-// Compose hardware.PacketScore with RxDelayForScore to match the firmware.
 type RxDelayFunc func(pkt *meshcore.Packet, packetLen int, estAirtimeMs uint32) time.Duration
 
-// RxDelayForScore is the firmware's Dispatcher::calcRxDelay. score comes from the
-// radio; a stronger packet scores higher and waits less.
+// RxDelayForScore is the firmware's Dispatcher::calcRxDelay, where a higher score waits less.
 func RxDelayForScore(score float64, estAirtimeMs uint32) time.Duration {
 	return time.Duration((math.Pow(10, 0.85-score)-1)*float64(estAirtimeMs)) * time.Millisecond
 }
@@ -132,8 +130,7 @@ func WithMaxPeers(maxPeers int) Option {
 	}
 }
 
-// WithLearnedPathsOnly stops adverts from setting OutPath, so sends flood until a
-// path is learned via the peer table's SetOutPath.
+// WithLearnedPathsOnly stops adverts from setting OutPath; unset, adverts set it.
 func WithLearnedPathsOnly() Option {
 	return func(c *nodeConfig) {
 		c.learnedPathsOnly = true
@@ -152,8 +149,7 @@ func WithAdvertInterval(d time.Duration) Option {
 	}
 }
 
-// WithChannels pre-populates channels starting at index 0.
-// Entries beyond the configured max channels are silently ignored.
+// WithChannels pre-populates channels from index 0, ignoring entries beyond the configured max.
 func WithChannels(chs ...*meshcore.ChannelEntry) Option {
 	return func(c *nodeConfig) {
 		c.channels = chs
@@ -208,10 +204,7 @@ func WithDirectRetransmitDelay(f RetransmitDelayFunc) Option {
 }
 
 // WithRxDelay sets how long a received flood packet is held before it is routed,
-// matching the firmware's rxdelay. Delays below 50ms route immediately and any
-// delay is capped at 32s; direct packets are never held. Setting it moves packet
-// dispatch off the radio's read goroutine onto a single inbound goroutine, so
-// handlers still never run concurrently.
+// ignored below 50ms and capped at 32s; unset, no packet is ever held.
 func WithRxDelay(f RxDelayFunc) Option {
 	return func(c *nodeConfig) {
 		c.rxDelay = f
@@ -219,8 +212,7 @@ func WithRxDelay(f RxDelayFunc) Option {
 }
 
 // WithExtraAckTransmitCount sets how many multipart copies of a relayed direct ACK
-// precede the plain one, each direct-retransmit-delay plus 300ms after the last.
-// Unset, only the plain ACK is relayed.
+// precede the plain one; unset, only the plain ACK is relayed.
 func WithExtraAckTransmitCount(f func() uint8) Option {
 	return func(c *nodeConfig) {
 		c.extraAcks = f
@@ -329,7 +321,6 @@ func New(identity meshcore.LocalIdentity, radio Radio, opts ...Option) *Node {
 	return n
 }
 
-// estAirtime returns the estimated airtime in ms, or 0 without an airtime estimator.
 func (n *Node) estAirtime(packetLen int) uint32 {
 	if n.txCfg.airtimeEstimator == nil {
 		return 0
@@ -371,9 +362,7 @@ func (n *Node) CancelACK(crc uint32) {
 	n.acks.cancel(crc)
 }
 
-// NotifyACK feeds an ACK CRC into the tracker as if it were received over
-// the air. Use this when an ACK is extracted from a PathReturn packet's
-// extra data rather than arriving as a standalone ACK packet.
+// NotifyACK feeds an ACK CRC into the tracker as if it were received over the air.
 func (n *Node) NotifyACK(crc uint32) {
 	n.acks.notifyCRC(crc)
 }
@@ -447,19 +436,8 @@ func (n *Node) canAcceptPacket(pkt *meshcore.Packet) bool {
 	return f != nil && f(pkt)
 }
 
-// OnPacket registers a handler for received packets of the given payload type
-// (meshcore.PayloadType*). Multiple handlers may be registered per type; they
-// run in registration order. Handlers run on the dispatch goroutine, so they
-// must not block.
-//
-// Deduplication is by packet hash only (matching the firmware): byte-identical
-// duplicates are dropped before dispatch, but retransmissions are NOT. A sender
-// (this library included) varies the attempt number in each text-message
-// retransmission so relays forward it, which gives every retry a distinct
-// packet hash. As a result, when a delivery succeeds but its ACK is lost, a
-// PayloadTypeTxtMsg handler can be invoked more than once for the same logical
-// message — exactly as on MeshCore firmware. Handlers that must suppress these
-// should dedup at the message level, e.g. by (sender key prefix, timestamp).
+// OnPacket registers a handler for received packets of the given payload type;
+// handlers run in registration order on the dispatch goroutine and must not block.
 func (n *Node) OnPacket(payloadType byte, h PacketHandler) {
 	n.handlerMu.Lock()
 	n.handlers[payloadType] = append(n.handlers[payloadType], h)
@@ -472,7 +450,6 @@ func (n *Node) SendPacket(pkt *meshcore.Packet) error {
 }
 
 // SendPacketDelayed enqueues a packet with explicit priority and delay.
-// Use for ACK responses and other timing-sensitive replies.
 func (n *Node) SendPacketDelayed(pkt *meshcore.Packet, priority uint8, delay time.Duration) error {
 	n.router.dedup.MarkSeen(pkt)
 	data, err := pkt.ToBytes()
@@ -573,17 +550,10 @@ func (n *Node) SendTextMessage(
 		return err
 	}
 
-	// path semantics: nil = unknown (flood), non-nil = known route. A non-nil
-	// zero-length path is a direct 0-hop neighbour and must route direct, not
-	// flood, so test for nil rather than length.
+	// A non-nil zero-length path is a 0-hop neighbour and must route direct, so test nil, not length.
 	isDirect := path != nil
 
-	// compose builds the TXT_MSG packet for a given attempt. The attempt is
-	// encoded into the flags byte (matching firmware composeMsgPacket) so every
-	// (re)transmission has a unique packet hash and survives 1.16 packet-hash
-	// dedup. The flags byte feeds the ACK hash, so the expected ACK CRC is
-	// recomputed per attempt and returned. useDirect routes over the known path;
-	// otherwise the packet floods.
+	// The attempt goes in the flags byte, giving each retransmission a distinct packet hash and ACK CRC.
 	compose := func(attempt int, useDirect bool) (*meshcore.Packet, uint32, error) {
 		plaintext := meshcore.BuildTextPlaintextWithAttempt(timestamp, flags, text, attempt)
 		ackCRC := meshcore.CalcAckHash(textAckHashInput(plaintext, len(text)), self.PublicKeyBytes())
@@ -612,7 +582,6 @@ func (n *Node) SendTextMessage(
 		return pkt, ackCRC, nil
 	}
 
-	// Initial transmission is attempt 0.
 	pkt, ackCRC, err := compose(0, isDirect)
 	if err != nil {
 		return err
@@ -679,8 +648,8 @@ func (n *Node) TxQueueLen() int {
 	return n.txRadio.TxQueueLen()
 }
 
-// TxStats returns runtime counters from the underlying transmit engine.
-// Returns the zero value if the underlying radio does not expose stats.
+// TxStats returns runtime counters from the underlying transmit engine, or the
+// zero value if the radio exposes none.
 func (n *Node) TxStats() TxStats {
 	type txStatser interface{ TxStats() TxStats }
 	if s, ok := n.txRadio.(txStatser); ok {
@@ -689,9 +658,8 @@ func (n *Node) TxStats() TxStats {
 	return TxStats{}
 }
 
-// Stop signals shutdown to background goroutines and closes the radio.
-// It is safe to call Stop multiple times; only the first call closes the
-// radio.
+// Stop signals shutdown to background goroutines and closes the radio; only the
+// first of repeated calls has any effect.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.done)

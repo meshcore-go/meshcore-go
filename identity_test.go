@@ -440,7 +440,6 @@ const (
 	fwTestPub = "1ec77175b0918ed206f9ae04ec136d6d5d4315bb26305427f645b492e9350c10"
 )
 
-// expandSeedForTest derives the expanded key for a seed: SHA-512, clamped.
 func expandSeedForTest(seed []byte) []byte {
 	h := sha512.Sum512(seed)
 	h[0] &= 248

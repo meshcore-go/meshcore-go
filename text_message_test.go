@@ -330,12 +330,10 @@ func TestBuildTextPlaintextWithAttempt(t *testing.T) {
 	ts := time.Unix(0x01020304, 0)
 	text := []byte("hi")
 
-	// Attempt 0 must equal the plain builder: flags low bits clear, no tail.
 	if got, want := BuildTextPlaintextWithAttempt(ts, 0, text, 0), BuildTextPlaintext(ts, 0, text); !bytes.Equal(got, want) {
 		t.Errorf("attempt 0 = %x, want %x", got, want)
 	}
 
-	// Low 2 bits carry attempt&3; upper bits (TXT_TYPE_*) are preserved.
 	const txtType = 1 // TXT_TYPE_CLI_DATA
 	flags := byte(txtType << 2)
 	p2 := BuildTextPlaintextWithAttempt(ts, flags, text, 2)
@@ -346,8 +344,7 @@ func TestBuildTextPlaintextWithAttempt(t *testing.T) {
 		t.Errorf("attempt 2 len = %d, want %d (no tail)", len(p2), 5+len(text))
 	}
 
-	// Attempt > 3 appends [0x00][attempt]; the low bits wrap (4&3 == 0), so the
-	// explicit attempt byte is what keeps the packet hash unique.
+	// Low bits wrap at attempt 4 (4&3 == 0), so the [0x00][attempt] tail is what keeps the hash unique.
 	p4 := BuildTextPlaintextWithAttempt(ts, 0, text, 4)
 	if len(p4) != 5+len(text)+2 {
 		t.Fatalf("attempt 4 len = %d, want %d (tail)", len(p4), 5+len(text)+2)
@@ -359,7 +356,6 @@ func TestBuildTextPlaintextWithAttempt(t *testing.T) {
 		t.Errorf("attempt 4 tail = [%02x %02x], want [00 04]", p4[len(p4)-2], p4[len(p4)-1])
 	}
 
-	// Distinct attempts must yield distinct payloads → unique packet hashes.
 	seen := map[string]bool{}
 	for a := 0; a <= 5; a++ {
 		key := string(BuildTextPlaintextWithAttempt(ts, 0, text, a))

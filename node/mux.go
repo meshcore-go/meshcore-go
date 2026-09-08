@@ -106,15 +106,8 @@ func (v *virtualRadio) deliver(pkt *meshcore.Packet, raw []byte, snr float32, rs
 	}
 }
 
-// RadioMux shares a single Modem across multiple virtual radios.
-// Incoming packets are delivered to each virtual radio that accepts them
-// via its PacketFilter. Outgoing packets are serialized through a shared
-// transmit queue to prevent concurrent writes to the modem.
-//
-// Like firmware's markSeen-on-send, the mux remembers every packet it
-// transmits; a copy that a neighbour bounces back is still delivered to the
-// virtual radios but flagged do-not-retransmit, so one radio never relays
-// its own traffic even when the originating and relaying Nodes differ.
+// RadioMux shares a single Modem across multiple virtual radios, delivering each
+// incoming packet to every virtual radio whose PacketFilter accepts it.
 type RadioMux struct {
 	modem  Modem
 	log    *slog.Logger

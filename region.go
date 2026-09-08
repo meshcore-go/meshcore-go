@@ -48,9 +48,7 @@ func normalizeRegionName(name string) string {
 	return "#" + name
 }
 
-// DeriveRegionKey computes the 16-byte region key from a region name.
-// For hashtag regions: SHA256(name)[0:16]. The name should already
-// include the '#' prefix.
+// DeriveRegionKey computes the 16-byte region key for a '#'-prefixed name: SHA256(name)[:16].
 func DeriveRegionKey(name string) RegionKey {
 	h := sha256.Sum256([]byte(name))
 	var key RegionKey
@@ -67,9 +65,9 @@ func (k RegionKey) IsZero() bool {
 	return true
 }
 
-// CalcTransportCode computes the per-packet transport code for this region key.
-// Result is HMAC-SHA256(key, payloadType || payload) truncated to uint16.
-// Codes 0x0000 and 0xFFFF are reserved and shifted to 0x0001/0xFFFE.
+// CalcTransportCode computes the per-packet transport code:
+// HMAC-SHA256(key, payloadType ‖ payload) truncated to uint16, with 0x0000 and
+// 0xFFFF reserved.
 func (k RegionKey) CalcTransportCode(payloadType byte, payload []byte) uint16 {
 	mac := hmac.New(sha256.New, k[:])
 	mac.Write([]byte{payloadType})
@@ -101,8 +99,7 @@ func (r *Region) DenyDirect() bool {
 	return r.Flags&RegionDenyDirect != 0
 }
 
-// IsValidRegionNameChar matches C++ RegionMap::is_name_char:
-// accepts alphanumeric, accented chars (>=0x41), '-', '$', '#'.
+// IsValidRegionNameChar reports whether c is allowed in a region name.
 func IsValidRegionNameChar(c byte) bool {
 	return c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || c >= 'A'
 }

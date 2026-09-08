@@ -355,12 +355,7 @@ func (r PushContactDeletedResponse) Identity() meshcore.Identity {
 
 type PushContactsFullResponse struct{}
 
-// snrDBFromWire converts an on-wire SNR byte to real decibels. MeshCore
-// firmware encodes SNR in quarter-dB units — every companion SNR/LastSNR field
-// is sent as (int8)(getSNR()*4) or (int8)(getLastSNR()*4) (see
-// companion_radio/MyMesh.cpp). Dividing by 4 recovers real dB with exact
-// 0.25 dB resolution. Per-hop trace PathSnrs are left raw; decode them with
-// meshcore.PathSNRdB.
+// snrDBFromWire converts the firmware's quarter-dB SNR byte to real decibels.
 func snrDBFromWire(b int8) float32 { return meshcore.SNRFromWire(b) }
 
 // pathByteLen decodes the firmware path_len byte.
@@ -415,7 +410,6 @@ var responseParsers = map[byte]func([]byte) (any, error){
 	PushContactsFull:          parser(ParsePushContactsFullResponse),
 }
 
-// parser adapts a typed payload parser to the responseParsers signature.
 func parser[T any](f func([]byte) (T, error)) func([]byte) (any, error) {
 	return func(b []byte) (any, error) { return f(b) }
 }

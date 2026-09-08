@@ -32,8 +32,8 @@ type router struct {
 // extraAckSpacing is the fixed gap firmware leaves between copies of a relayed direct ACK.
 const extraAckSpacing = 300 * time.Millisecond
 
-// route returns the action for an incoming packet; a direct relay consumes pkt's path in place.
-// A flood packet returns RouteActionDeliver; call relayFlood after local dispatch.
+// route returns the action for an incoming packet; a direct relay consumes pkt's
+// path in place, and a flood packet still needs relayFlood after local dispatch.
 func (r *router) route(pkt *meshcore.Packet) RouteAction {
 	switch {
 	case pkt.IsRouteFlood():
@@ -131,9 +131,8 @@ const traceHeaderSize = 9
 // multiAckMinPayload is the wrapper byte plus the 4-byte ACK CRC.
 const multiAckMinPayload = 5
 
-// unwrapMultiAck returns the inner ACK of a multipart-wrapped ACK. The returned
-// packet keeps the MULTIPART header so its dedup hash matches the firmware's,
-// which fingerprints multipart copies apart from the trailing plain ACK.
+// unwrapMultiAck returns the inner ACK of a multipart-wrapped ACK, keeping the
+// MULTIPART header so its dedup hash stays distinct from the trailing plain ACK.
 func unwrapMultiAck(pkt *meshcore.Packet) (inner *meshcore.Packet, remaining uint8, ok bool) {
 	if len(pkt.Payload) < multiAckMinPayload {
 		return nil, 0, false
@@ -159,8 +158,8 @@ func (r *router) forwardMultipartDirect(pkt *meshcore.Packet) RouteAction {
 	return RouteActionForward
 }
 
-// routeDirectRecvAcks relays an ACK as extraAckCount multipart copies followed by
-// a plain ACK, spaced like the firmware's Mesh::routeDirectRecvAcks.
+// routeDirectRecvAcks relays an ACK as extraAckCount spaced multipart copies
+// followed by a plain ACK.
 func (r *router) routeDirectRecvAcks(pkt *meshcore.Packet, delay time.Duration) {
 	if pkt.IsMarkedDoNotRetransmit() {
 		return
