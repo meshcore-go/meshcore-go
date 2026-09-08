@@ -18,6 +18,7 @@ type mockTransport struct {
 	frameH   func(*KissFrame)
 	errorH   func(error)
 	connectF func(ctx context.Context) error
+	onSend   func([]byte)
 	dead     chan struct{}
 	closed   atomic.Bool
 }
@@ -38,7 +39,11 @@ func (m *mockTransport) Close() error { m.closed.Store(true); return nil }
 func (m *mockTransport) Send(data []byte) error {
 	m.mu.Lock()
 	m.sent = append(m.sent, data)
+	h := m.onSend
 	m.mu.Unlock()
+	if h != nil {
+		h(data)
+	}
 	return nil
 }
 
@@ -1055,5 +1060,41 @@ func TestRequest_IgnoresAnUnsolicitedTxBusyError(t *testing.T) {
 	}
 	if mv != 3856 {
 		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+// TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms pins a deliberate
+// trade-off, not a desirable behaviour. Suppressing this adoption needs a mark
+// on the response code, and such a mark is never cleared when the reply is
+// simply lost — which the firmware does when its TX queue cannot flush —
+// leaving the command dead until reconnect. A stale reading of the same query
+// is bounded; a dead command is not. Reintroducing the mark trades back.
+func TestRequest_AdoptsAReplyDispatchedAfterTheNextRequestArms(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+
+	// Dispatched after the second request has armed, which is the window
+	// nothing on the wire can disambiguate.
+	mt.mu.Lock()
+	mt.onSend = func([]byte) {
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x00, 0x01))
+	}
+	mt.mu.Unlock()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 256 {
+		t.Errorf("battery = %d mV, want 256: the stale reply is adopted here by design", mv)
 	}
 }

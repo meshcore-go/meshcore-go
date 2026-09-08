@@ -385,9 +385,15 @@ type hwReply struct {
 // set: on the default inline dispatch the handler occupies the goroutine that
 // would deliver the reply, so the call cannot complete.
 //
-// A reply to a request that has already timed out is discarded, because no
-// waiter is armed to receive it. Once the next request arms, KISS carries no
-// correlation id to tell a stale reply from that request's own answer.
+// A reply to a request that has already timed out is discarded while nothing
+// is outstanding, because no waiter is armed to receive it. One dispatched
+// after the next request has armed is adopted by it: KISS carries no
+// correlation id, and no timing separates them. That is harmless for the
+// idempotent payload-free queries above, which return the same measurement one
+// interval stale, but not for payload-dependent commands such as GET_AIRTIME,
+// GET_RANDOM or the signing and encryption commands, where it returns the
+// answer to a different input. After a timeout on one of those, reconnect or
+// check the reply against the request.
 func (m *KissModem) Request(ctx context.Context, cmd byte, payload []byte) ([]byte, error) {
 	return m.requestFor(ctx, cmd, payload, HwResp(cmd))
 }
