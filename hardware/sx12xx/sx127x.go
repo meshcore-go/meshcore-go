@@ -198,6 +198,9 @@ func (d *SX127x) ConfigurationLost() (bool, error) {
 // Reinitialize runs bring-up again on a chip that has lost its configuration.
 // Only the settings begin owns are restored: the caller reapplies the
 // modulation and packet parameters, which the driver does not retain.
+// The receive goroutine stays running throughout; stopping it would clear the
+// stop channel that ResumeReceive requires, and it is parked on d.mu for the
+// whole of begin.
 func (d *SX127x) Reinitialize() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
