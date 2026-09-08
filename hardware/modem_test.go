@@ -941,8 +941,11 @@ func TestRequest_DoesNotAdoptALateReply(t *testing.T) {
 	if _, err := m.Battery(ctx); err == nil {
 		t.Fatal("first request should have timed out")
 	}
-	// The abandoned reply arrives now, before the next request is made.
+	// The abandoned reply arrives and is dispatched while the modem is idle,
+	// which is the window the stale mark can actually protect: once a new
+	// request has armed, KISS offers nothing to tell its reply from this one.
 	mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x00, 0x01))
+	time.Sleep(30 * time.Millisecond)
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -1008,5 +1011,49 @@ func TestRequest_DoesNotStarveOnHwResponseHandlers(t *testing.T) {
 	case <-seen:
 	case <-time.After(time.Second):
 		t.Error("registered OnHwResponse handler never fired")
+	}
+}
+
+func TestRequest_RecoversAfterAReplyIsLost(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	// The firmware drops responses when its TX queue is full, so a request can
+	// time out with no reply ever arriving.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery after a lost reply: %v — the command stayed poisoned", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+func TestRequest_IgnoresAnUnsolicitedTxBusyError(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	// The firmware raises TX_BUSY from its data path, unprompted; it can never
+	// be the answer to a query, and adopting it fails an unrelated request.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HW_RESP_ERROR, HW_ERR_TX_BUSY))
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v — an unsolicited tx-busy error was adopted", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
 	}
 }

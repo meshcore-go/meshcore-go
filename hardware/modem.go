@@ -183,13 +183,8 @@ type KissModem struct {
 	hwWaitMu  sync.Mutex
 	hwWaitFor byte
 	hwWaiter  chan hwReply
-	// hwStale marks response codes whose request was abandoned. The reply may
-	// still be queued, and nothing on the wire distinguishes it from the next
-	// request's, so the first matching reply after a timeout is discarded.
-	hwStale map[byte]bool
-
-	dataMu sync.RWMutex
-	dataH  DataFrameHandler
+	dataMu    sync.RWMutex
+	dataH     DataFrameHandler
 
 	signalMu        sync.Mutex
 	signalRequested bool
@@ -210,7 +205,6 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 		txFlowControl: true,
 		txTimeout:     DefaultTxTimeout,
 		hwMap:         make(map[byte][]HwFrameHandler),
-		hwStale:       make(map[byte]bool),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -301,7 +295,6 @@ func (m *KissModem) Connect(ctx context.Context) error {
 		return ErrModemClosed
 	}
 	m.releaseTx()
-	m.releaseHwStale()
 	m.signalMu.Lock()
 	defer m.signalMu.Unlock()
 	val := byte(0)
@@ -316,14 +309,6 @@ func (m *KissModem) Connect(ctx context.Context) error {
 }
 
 // releaseTx drops an outstanding TX_DONE wait; a reconnect makes it unknowable.
-// releaseHwStale drops abandoned-reply markers; after a reconnect the firmware
-// may have rebooted, so no queued reply is still coming.
-func (m *KissModem) releaseHwStale() {
-	m.hwWaitMu.Lock()
-	m.hwStale = make(map[byte]bool)
-	m.hwWaitMu.Unlock()
-}
-
 func (m *KissModem) releaseTx() {
 	m.txMu.Lock()
 	defer m.txMu.Unlock()
@@ -395,6 +380,14 @@ type hwReply struct {
 // Request sends a hardware command and waits for its reply, which the firmware
 // answers with HwResp(cmd). Requests are serialized. The older Get* methods
 // send without waiting and deliver through OnHwResponse instead.
+//
+// Do not call this from a frame or data handler unless WithHandlerWorkers is
+// set: on the default inline dispatch the handler occupies the goroutine that
+// would deliver the reply, so the call cannot complete.
+//
+// A reply to a request that has already timed out is discarded, because no
+// waiter is armed to receive it. Once the next request arms, KISS carries no
+// correlation id to tell a stale reply from that request's own answer.
 func (m *KissModem) Request(ctx context.Context, cmd byte, payload []byte) ([]byte, error) {
 	return m.requestFor(ctx, cmd, payload, HwResp(cmd))
 }
@@ -413,7 +406,6 @@ func (m *KissModem) requestFor(ctx context.Context, cmd byte, payload []byte, wa
 	abandon := func() {
 		m.hwWaitMu.Lock()
 		m.hwWaiter = nil
-		m.hwStale[want] = true
 		m.hwWaitMu.Unlock()
 	}
 	clear := func() {
@@ -447,11 +439,6 @@ func (m *KissModem) requestFor(ctx context.Context, cmd byte, payload []byte, wa
 // channel is buffered and the waiter is cleared by the requester.
 func (m *KissModem) completeHwRequest(subCmd byte, data []byte) {
 	m.hwWaitMu.Lock()
-	if m.hwStale[subCmd] {
-		delete(m.hwStale, subCmd)
-		m.hwWaitMu.Unlock()
-		return
-	}
 	ch, want := m.hwWaiter, m.hwWaitFor
 	m.hwWaitMu.Unlock()
 	if ch == nil {
@@ -467,6 +454,9 @@ func (m *KissModem) completeHwRequest(subCmd byte, data []byte) {
 		code := byte(0)
 		if len(data) > 0 {
 			code = data[0]
+		}
+		if code == HW_ERR_TX_BUSY {
+			return
 		}
 		select {
 		case ch <- hwReply{err: fmt.Errorf("%w: %w", ErrHwRequestFailed, HwErrorFor(code))}:
