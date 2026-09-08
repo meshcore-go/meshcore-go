@@ -465,3 +465,60 @@ func TestModulationAndPacketParamsSendDatasheetLengths(t *testing.T) {
 		}
 	}
 }
+
+func TestPacketWithNoCrcInItsHeaderIsDropped(t *testing.T) {
+	// MeshCore drops these, so delivering one would hand the mesh layer a
+	// payload no node has integrity-checked.
+	for _, tc := range []struct {
+		name        string
+		hopChannel  byte
+		crcExpected bool
+		wantDropped bool
+	}{
+		{"header carries a CRC", 0x40, true, false},
+		{"header says no CRC while we expect one", 0x00, true, true},
+		{"header says no CRC and we did not ask for one", 0x00, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			regs := &fakeRegs{regs: map[byte]byte{
+				regIrqFlags:   lrIrqRxDone,
+				regHopChannel: tc.hopChannel,
+			}}
+			d := newTestSX127x(regs, 4)
+			d.crcOn = tc.crcExpected
+			regs.fifo = []byte{1, 2, 3}
+
+			d.drainPending()
+
+			dropped := len(d.packets) == 0
+			if dropped != tc.wantDropped {
+				t.Errorf("dropped = %v, want %v", dropped, tc.wantDropped)
+			}
+			if tc.wantDropped && d.Stats().PacketsCRCErrors == 0 {
+				t.Error("dropped without counting a CRC error")
+			}
+		})
+	}
+}
+
+func TestOpModeKeepsThePoweredUpBandBit(t *testing.T) {
+	// RadioLib and Semtech's driver both leave RegOpMode bit 3 alone, so
+	// MeshCore nodes run whatever reset left. Deriving it from the frequency
+	// diverged at 868 and 915, which is where every one of them runs.
+	for _, reset := range []byte{modeLowFrequencyOn, 0x00} {
+		regs := &fakeRegs{regs: map[byte]byte{regVersion: versionSX1276, regOpMode: modeSleep | reset}}
+		d := &SX127x{c: regs, reset: &gpiotest.Pin{N: "RESET", L: gpio.Low}}
+		if err := d.begin(); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := d.setFrequency(869525000); err != nil {
+			t.Fatalf("setFrequency: %v", err)
+		}
+		if err := d.setMode(modeStandby); err != nil {
+			t.Fatalf("setMode: %v", err)
+		}
+		if got := regs.regs[regOpMode] & modeLowFrequencyOn; got != reset {
+			t.Errorf("band bit = %#02x at 869 MHz, want the reset value %#02x", got, reset)
+		}
+	}
+}

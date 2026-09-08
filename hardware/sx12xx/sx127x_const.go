@@ -41,7 +41,7 @@ const (
 	regPktSnrValue        = 0x19 // signed, /4 = dB
 	regPktRssiValue       = 0x1A
 	regRssiValue          = 0x1B
-	regHopChannel         = 0x1C
+	regHopChannel         = 0x1C // bit 6 CrcOnPayload: the header's CRC-present flag
 	regModemConfig1       = 0x1D
 	regModemConfig2       = 0x1E
 	regSymbTimeoutLsb     = 0x1F

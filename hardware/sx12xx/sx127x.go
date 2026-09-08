@@ -62,7 +62,9 @@ var DefaultSX127xOpts = SX127xOpts{
 }
 
 // SX127x is a handle to an SX1276/77/78/79 transceiver on an SPI bus, safe for
-// concurrent use.
+// concurrent use. Unlike the SX126x driver, no part of it has been exercised on
+// hardware: its register semantics are matched to the RadioLib build MeshCore
+// runs, and nothing more.
 type SX127x struct {
 	c    spi.Conn
 	opts SX127xOpts
@@ -91,10 +93,15 @@ type SX127x struct {
 	wg   sync.WaitGroup
 
 	// Cached configuration consulted by the LoRa/FSK setters.
-	longRange      bool
-	lowFrequency   bool
+	longRange    bool
+	lowFrequency bool
+	// opModeBand is RegOpMode bit 3 as the chip powered up. RadioLib and
+	// Semtech's driver both leave it alone, so MeshCore nodes run whatever
+	// reset left; deriving it from the frequency would diverge at 868 and 915.
+	opModeBand     byte
 	frequency      uint32 // Hz
 	implicitHeader bool
+	crcOn          bool
 	version        byte // 0x12 or 0x22
 }
 
@@ -225,6 +232,12 @@ func (d *SX127x) begin() error {
 	}
 	d.version = v
 
+	op, err := d.readReg(regOpMode)
+	if err != nil {
+		return fmt.Errorf("sx127x: reading op mode: %w", err)
+	}
+	d.opModeBand = op & modeLowFrequencyOn
+
 	if err := d.switchModem(true); err != nil {
 		return err
 	}
@@ -348,9 +361,7 @@ func (d *SX127x) setMode(mode byte) error {
 	if d.longRange {
 		v |= modeLongRangeMode
 	}
-	if d.lowFrequency {
-		v |= modeLowFrequencyOn
-	}
+	v |= d.opModeBand
 	return d.writeReg(regOpMode, v)
 }
 
@@ -366,14 +377,12 @@ func (d *SX127x) switchModem(longRange bool) error {
 	if longRange {
 		v |= modeLongRangeMode
 	}
-	if d.lowFrequency {
-		v |= modeLowFrequencyOn
-	}
+	v |= d.opModeBand
 	return d.writeReg(regOpMode, v)
 }
 
 // setFrequency programs the RF carrier in Hz (Frf = hz * 2^19 / Fxosc) and
-// caches the band flag for the next setMode.
+// caches the band flag for the RSSI offset.
 func (d *SX127x) setFrequency(hz uint32) error {
 	frf := uint32(uint64(hz) * sx127xFstepDiv / sx127xXtalFreqHz)
 	if err := d.writeReg(regFrfMsb, byte(frf>>16)); err != nil {

@@ -289,6 +289,7 @@ func (d *SX127x) SetPacketParams(preambleLen uint16, explicitHeader bool, crc bo
 		return err
 	}
 	d.implicitHeader = !explicitHeader
+	d.crcOn = crc
 
 	crcBit := byte(0x00)
 	if crc {
@@ -325,6 +326,9 @@ func (d *SX127x) SetPacketParams(preambleLen uint16, explicitHeader bool, crc bo
 func (d *SX127x) SetPayloadLength(length byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireLoRaSetter(); err != nil {
+		return err
+	}
 	return d.writeReg(regPayloadLength, length)
 }
 
@@ -332,6 +336,9 @@ func (d *SX127x) SetPayloadLength(length byte) error {
 func (d *SX127x) SetSyncWord(b byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireLoRaSetter(); err != nil {
+		return err
+	}
 	return d.writeReg(regSyncWordLoRa, b)
 }
 
@@ -417,6 +424,29 @@ func (d *SX127x) transmit(payload []byte, timeout time.Duration) error {
 	return d.setMode(modeStandby)
 }
 
+// headerSaysNoCRC reports a packet whose header carries no CRC while we
+// expect one. MeshCore drops these, so delivering one would hand the mesh
+// layer a payload no node has integrity-checked. Holds d.mu.
+func (d *SX127x) headerSaysNoCRC() bool {
+	if !d.crcOn {
+		return false
+	}
+	hop, err := d.readReg(regHopChannel)
+	if err != nil {
+		return false // cannot tell; let the payload through as before
+	}
+	return hop&0x40 == 0
+}
+
+// requireLoRaSetter refuses a configuration change while the receiver is
+// armed, as the other LoRa setters do. Holds d.mu.
+func (d *SX127x) requireLoRaSetter() error {
+	if d.recvArmed {
+		return errors.New("sx127x: busy receiving continuously")
+	}
+	return nil
+}
+
 // requireLoRa reports whether the packet path can run: it programs the LoRa
 // register layout, which in FSK would configure the wrong fields. Holds d.mu.
 func (d *SX127x) requireLoRa(op string) error {
@@ -452,7 +482,7 @@ func (d *SX127x) drainPending() {
 		return
 	}
 	d.rxLed.blink()
-	if flags&lrIrqPayloadCrcErr != 0 {
+	if flags&lrIrqPayloadCrcErr != 0 || d.headerSaysNoCRC() {
 		d.nCRCErr.Add(1)
 		_ = d.writeReg(regIrqFlags, lrIrqAll)
 		return
@@ -679,7 +709,7 @@ func (d *SX127x) ReceiveContinuous() (<-chan Packet, error) {
 				continue
 			}
 			d.rxLed.blink()
-			if flags&lrIrqPayloadCrcErr != 0 {
+			if flags&lrIrqPayloadCrcErr != 0 || d.headerSaysNoCRC() {
 				d.nCRCErr.Add(1)
 				_ = d.writeReg(regIrqFlags, lrIrqAll)
 				d.mu.Unlock()
