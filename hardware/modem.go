@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -175,6 +176,18 @@ type KissModem struct {
 	hwMu  sync.RWMutex
 	hwMap map[byte][]HwFrameHandler
 
+	// One hardware request is in flight at a time: HW_RESP_ERROR carries no
+	// correlation id, so a second concurrent request could not tell whose
+	// failure it was.
+	hwReqMu   sync.Mutex
+	hwWaitMu  sync.Mutex
+	hwWaitFor byte
+	hwWaiter  chan hwReply
+	// hwStale marks response codes whose request was abandoned. The reply may
+	// still be queued, and nothing on the wire distinguishes it from the next
+	// request's, so the first matching reply after a timeout is discarded.
+	hwStale map[byte]bool
+
 	dataMu sync.RWMutex
 	dataH  DataFrameHandler
 
@@ -197,6 +210,7 @@ func NewKissModem(t Transport, opts ...ModemOption) *KissModem {
 		txFlowControl: true,
 		txTimeout:     DefaultTxTimeout,
 		hwMap:         make(map[byte][]HwFrameHandler),
+		hwStale:       make(map[byte]bool),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -287,6 +301,7 @@ func (m *KissModem) Connect(ctx context.Context) error {
 		return ErrModemClosed
 	}
 	m.releaseTx()
+	m.releaseHwStale()
 	m.signalMu.Lock()
 	defer m.signalMu.Unlock()
 	val := byte(0)
@@ -301,6 +316,14 @@ func (m *KissModem) Connect(ctx context.Context) error {
 }
 
 // releaseTx drops an outstanding TX_DONE wait; a reconnect makes it unknowable.
+// releaseHwStale drops abandoned-reply markers; after a reconnect the firmware
+// may have rebooted, so no queued reply is still coming.
+func (m *KissModem) releaseHwStale() {
+	m.hwWaitMu.Lock()
+	m.hwStale = make(map[byte]bool)
+	m.hwWaitMu.Unlock()
+}
+
 func (m *KissModem) releaseTx() {
 	m.txMu.Lock()
 	defer m.txMu.Unlock()
@@ -357,6 +380,99 @@ func (m *KissModem) SetDataHandler(h DataFrameHandler) {
 	m.dataMu.Lock()
 	m.dataH = h
 	m.dataMu.Unlock()
+}
+
+// ErrHwRequestFailed is returned when the firmware answers a hardware request
+// with HW_RESP_ERROR.
+var ErrHwRequestFailed = errors.New("kiss: hardware request failed")
+
+// hwReply is one firmware answer to a hardware request.
+type hwReply struct {
+	data []byte
+	err  error
+}
+
+// Request sends a hardware command and waits for its reply, which the firmware
+// answers with HwResp(cmd). Requests are serialized. The older Get* methods
+// send without waiting and deliver through OnHwResponse instead.
+func (m *KissModem) Request(ctx context.Context, cmd byte, payload []byte) ([]byte, error) {
+	return m.requestFor(ctx, cmd, payload, HwResp(cmd))
+}
+
+func (m *KissModem) requestFor(ctx context.Context, cmd byte, payload []byte, want byte) ([]byte, error) {
+	if m.closed.Load() {
+		return nil, ErrModemClosed
+	}
+	m.hwReqMu.Lock()
+	defer m.hwReqMu.Unlock()
+
+	ch := make(chan hwReply, 1)
+	m.hwWaitMu.Lock()
+	m.hwWaitFor, m.hwWaiter = want, ch
+	m.hwWaitMu.Unlock()
+	abandon := func() {
+		m.hwWaitMu.Lock()
+		m.hwWaiter = nil
+		m.hwStale[want] = true
+		m.hwWaitMu.Unlock()
+	}
+	clear := func() {
+		m.hwWaitMu.Lock()
+		m.hwWaiter = nil
+		m.hwWaitMu.Unlock()
+	}
+
+	dead := m.transport.Dead()
+	if err := m.SendHardwareCommand(cmd, payload); err != nil {
+		clear()
+		return nil, err
+	}
+	select {
+	case reply := <-ch:
+		clear()
+		return reply.data, reply.err
+	case <-ctx.Done():
+		abandon()
+		return nil, ctx.Err()
+	case <-dead:
+		abandon()
+		return nil, ErrDisconnected
+	case <-m.done:
+		abandon()
+		return nil, ErrModemClosed
+	}
+}
+
+// completeHwRequest hands a reply to a waiting Request. It never blocks: the
+// channel is buffered and the waiter is cleared by the requester.
+func (m *KissModem) completeHwRequest(subCmd byte, data []byte) {
+	m.hwWaitMu.Lock()
+	if m.hwStale[subCmd] {
+		delete(m.hwStale, subCmd)
+		m.hwWaitMu.Unlock()
+		return
+	}
+	ch, want := m.hwWaiter, m.hwWaitFor
+	m.hwWaitMu.Unlock()
+	if ch == nil {
+		return
+	}
+	switch subCmd {
+	case want:
+		select {
+		case ch <- hwReply{data: data}:
+		default:
+		}
+	case HW_RESP_ERROR:
+		code := byte(0)
+		if len(data) > 0 {
+			code = data[0]
+		}
+		select {
+		case ch <- hwReply{err: fmt.Errorf("%w: %w", ErrHwRequestFailed, HwErrorFor(code))}:
+		default:
+		}
+	}
 }
 
 // OnHwResponse registers a handler for a specific hardware sub-command response.
@@ -762,6 +878,7 @@ func (m *KissModem) dispatchHwFrame(frame *KissFrame) {
 	if subCmd == HW_RESP_ERROR {
 		m.handleHwError(data)
 	}
+	m.completeHwRequest(subCmd, data)
 
 	m.hwMu.RLock()
 	handlers := m.hwMap[subCmd]
@@ -792,4 +909,139 @@ func (m *KissModem) dispatchError(err error) {
 	if h != nil {
 		h(err)
 	}
+}
+
+// FirmwareStats are the packet counters the firmware keeps.
+type FirmwareStats struct {
+	PacketsRecv   uint32
+	PacketsSent   uint32
+	PacketsErrors uint32
+}
+
+// Battery returns the battery voltage in millivolts.
+func (m *KissModem) Battery(ctx context.Context) (uint16, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_BATTERY, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 2 {
+		return 0, fmt.Errorf("kiss: battery reply too short: %d bytes", len(data))
+	}
+	return binary.LittleEndian.Uint16(data), nil
+}
+
+// NoiseFloor returns the measured noise floor in dBm.
+func (m *KissModem) NoiseFloor(ctx context.Context) (int16, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_NOISE_FLOOR, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 2 {
+		return 0, fmt.Errorf("kiss: noise floor reply too short: %d bytes", len(data))
+	}
+	return int16(binary.LittleEndian.Uint16(data)), nil
+}
+
+// MCUTemp returns the MCU temperature in degrees Celsius. The firmware sends
+// signed tenths of a degree, and answers HW_ERR_NO_CALLBACK on a board that
+// cannot read it.
+func (m *KissModem) MCUTemp(ctx context.Context) (float32, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_MCU_TEMP, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 2 {
+		return 0, fmt.Errorf("kiss: mcu temp reply too short: %d bytes", len(data))
+	}
+	return float32(int16(binary.LittleEndian.Uint16(data))) / 10, nil
+}
+
+// CurrentRSSI returns the instantaneous RSSI in dBm.
+func (m *KissModem) CurrentRSSI(ctx context.Context) (int8, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_CURRENT_RSSI, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 1 {
+		return 0, fmt.Errorf("kiss: rssi reply is empty")
+	}
+	return int8(data[0]), nil
+}
+
+// FirmwareCounters returns the firmware's packet counters.
+func (m *KissModem) FirmwareCounters(ctx context.Context) (FirmwareStats, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_STATS, nil)
+	if err != nil {
+		return FirmwareStats{}, err
+	}
+	if len(data) < 12 {
+		return FirmwareStats{}, fmt.Errorf("kiss: stats reply too short: %d bytes", len(data))
+	}
+	return FirmwareStats{
+		PacketsRecv:   binary.LittleEndian.Uint32(data[0:4]),
+		PacketsSent:   binary.LittleEndian.Uint32(data[4:8]),
+		PacketsErrors: binary.LittleEndian.Uint32(data[8:12]),
+	}, nil
+}
+
+// ChannelBusy reports whether the firmware currently hears a packet.
+func (m *KissModem) ChannelBusy(ctx context.Context) (bool, error) {
+	data, err := m.Request(ctx, HW_CMD_IS_CHANNEL_BUSY, nil)
+	if err != nil {
+		return false, err
+	}
+	if len(data) < 1 {
+		return false, fmt.Errorf("kiss: channel busy reply is empty")
+	}
+	return data[0] != 0, nil
+}
+
+// FirmwareVersion returns the KISS firmware version byte.
+func (m *KissModem) FirmwareVersion(ctx context.Context) (uint8, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_VERSION, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 1 {
+		return 0, fmt.Errorf("kiss: version reply is empty")
+	}
+	return data[0], nil
+}
+
+// DeviceName returns the firmware's device name.
+func (m *KissModem) DeviceName(ctx context.Context) (string, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_DEVICE_NAME, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// RadioConfiguration returns the firmware's cached radio parameters, which are
+// zero until the host has set them.
+func (m *KissModem) RadioConfiguration(ctx context.Context) (*RadioConfig, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_RADIO, nil)
+	if err != nil {
+		return nil, err
+	}
+	return RadioConfigFromBytes(data)
+}
+
+// TxPowerLevel returns the firmware's cached transmit power in dBm.
+func (m *KissModem) TxPowerLevel(ctx context.Context) (uint8, error) {
+	data, err := m.Request(ctx, HW_CMD_GET_TX_POWER, nil)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 1 {
+		return 0, fmt.Errorf("kiss: tx power reply is empty")
+	}
+	return data[0], nil
+}
+
+// PingWait sends a ping and waits for the firmware to answer, confirming the
+// link is alive. Ping sends without waiting.
+func (m *KissModem) PingWait(ctx context.Context) error {
+	_, err := m.Request(ctx, HW_CMD_PING, nil)
+	return err
 }

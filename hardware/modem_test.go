@@ -835,3 +835,178 @@ func TestModem_CloseFromHandler(t *testing.T) {
 		})
 	}
 }
+
+func makeHwRespFrame(subCmd byte, payload ...byte) *KissFrame {
+	return &KissFrame{Port: 0, Command: KISS_CMD_SETHARDWARE, Data: append([]byte{subCmd}, payload...)}
+}
+
+// connectedModem returns a started modem plus its transport.
+func connectedModem(t *testing.T) (*KissModem, *mockTransport) {
+	t.Helper()
+	mt := newMockTransport()
+	m := NewKissModem(mt)
+	if err := m.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { m.Close() })
+	return m, mt
+}
+
+func TestRequest_ReturnsTheMatchingReply(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F)) // 3856 mV
+	}()
+
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856", mv)
+	}
+}
+
+// The firmware sends signed tenths of a degree, so a uint16 read would be wrong
+// in both scale and sign below zero.
+func TestMCUTemp_DecodesSignedTenths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  int16
+		want float32
+	}{
+		{"positive", 235, 23.5},
+		{"below freezing", -55, -5.5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, mt := connectedModem(t)
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_MCU_TEMP),
+					byte(uint16(tc.raw)), byte(uint16(tc.raw)>>8)))
+			}()
+			got, err := m.MCUTemp(context.Background())
+			if err != nil {
+				t.Fatalf("MCUTemp: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("MCUTemp = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoiseFloor_DecodesNegativeDBm(t *testing.T) {
+	m, mt := connectedModem(t)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		dbm := int16(-85)
+		raw := uint16(dbm)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_NOISE_FLOOR), byte(raw), byte(raw>>8)))
+	}()
+	got, err := m.NoiseFloor(context.Background())
+	if err != nil {
+		t.Fatalf("NoiseFloor: %v", err)
+	}
+	if got != -85 {
+		t.Errorf("NoiseFloor = %d, want -85", got)
+	}
+}
+
+// A reply that never arrives must fail, not hand back a stale or zero reading:
+// silently returning the previous poll's numbers is what callers had to do for
+// themselves before, and it cannot be distinguished from a fresh value.
+func TestRequest_TimesOutRatherThanReturningStale(t *testing.T) {
+	m, _ := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := m.Battery(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Battery with no reply = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v to give up", elapsed)
+	}
+}
+
+// A late reply belongs to the request that timed out, not to the next one.
+func TestRequest_DoesNotAdoptALateReply(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.Battery(ctx); err == nil {
+		t.Fatal("first request should have timed out")
+	}
+	// The abandoned reply arrives now, before the next request is made.
+	mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x00, 0x01))
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	mv, err := m.Battery(context.Background())
+	if err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	if mv != 3856 {
+		t.Errorf("battery = %d mV, want 3856 — the second request took the stale reply", mv)
+	}
+}
+
+func TestRequest_SurfacesHardwareError(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HW_RESP_ERROR, HW_ERR_NO_CALLBACK))
+	}()
+	_, err := m.MCUTemp(context.Background())
+	if !errors.Is(err, ErrHwRequestFailed) {
+		t.Fatalf("MCUTemp on a board that cannot read it = %v, want ErrHwRequestFailed", err)
+	}
+}
+
+func TestFirmwareCounters_DecodesThreeUint32(t *testing.T) {
+	m, mt := connectedModem(t)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_STATS),
+			0x01, 0, 0, 0, 0x02, 0, 0, 0, 0x03, 0, 0, 0))
+	}()
+	got, err := m.FirmwareCounters(context.Background())
+	if err != nil {
+		t.Fatalf("FirmwareCounters: %v", err)
+	}
+	if got != (FirmwareStats{PacketsRecv: 1, PacketsSent: 2, PacketsErrors: 3}) {
+		t.Errorf("counters = %+v", got)
+	}
+}
+
+// The pre-existing OnHwResponse handlers must keep firing alongside Request.
+func TestRequest_DoesNotStarveOnHwResponseHandlers(t *testing.T) {
+	m, mt := connectedModem(t)
+
+	seen := make(chan []byte, 1)
+	m.OnHwResponse(HwResp(HW_CMD_GET_BATTERY), func(_ byte, data []byte) {
+		select {
+		case seen <- data:
+		default:
+		}
+	})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mt.injectFrame(makeHwRespFrame(HwResp(HW_CMD_GET_BATTERY), 0x10, 0x0F))
+	}()
+	if _, err := m.Battery(context.Background()); err != nil {
+		t.Fatalf("Battery: %v", err)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Error("registered OnHwResponse handler never fired")
+	}
+}
