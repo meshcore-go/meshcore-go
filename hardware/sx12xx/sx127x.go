@@ -78,7 +78,6 @@ type SX127x struct {
 
 	packets   chan Packet
 	recvArmed bool
-	recvErr   error
 	dropped   atomic.Uint64
 	nRecv     atomic.Uint64
 	nSent     atomic.Uint64

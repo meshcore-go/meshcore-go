@@ -95,6 +95,9 @@ type Packet struct {
 func (d *SX126x) SetFrequency(hz uint32) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireDisarmed(); err != nil {
+		return err
+	}
 
 	f1, f2 := imageCalBand(hz)
 	if err := d.calibrateImage(f1, f2); err != nil {
@@ -178,6 +181,9 @@ var paOptTable = [32]struct {
 func (d *SX126x) SetModulationParams(sf int, bw Bandwidth, cr CodingRate, ldroAuto bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireDisarmed(); err != nil {
+		return err
+	}
 
 	if sf < 5 || sf > 12 {
 		return fmt.Errorf("sx126x: invalid spreading factor %d (valid 5..12)", sf)
@@ -202,7 +208,7 @@ func (d *SX126x) SetModulationParams(sf int, bw Bandwidth, cr CodingRate, ldroAu
 
 	d.sf = byte(sf)
 	if err := d.command(opSetModulationParams,
-		byte(sf), bwReg, crReg, ldro, 0x00, 0x00, 0x00, 0x00); err != nil {
+		byte(sf), bwReg, crReg, ldro); err != nil {
 		return err
 	}
 	// BW500 modulation-quality workaround (datasheet 15.1).
@@ -225,6 +231,9 @@ func (d *SX126x) SetModulationParams(sf int, bw Bandwidth, cr CodingRate, ldroAu
 func (d *SX126x) SetPacketParams(preambleLen uint16, explicitHeader, crc, invertIq bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireDisarmed(); err != nil {
+		return err
+	}
 	d.preambleLen = preambleLen
 	d.explicitHeader = explicitHeader
 	d.crcOn = crc
@@ -268,8 +277,7 @@ func (d *SX126x) setPacketParamsLoRa(preambleLen uint16, explicitHeader bool, pa
 
 	if err := d.command(opSetPacketParams,
 		byte(preambleLen>>8), byte(preambleLen),
-		header, byte(payloadLen), crcByte, iq,
-		0x00, 0x00, 0x00); err != nil {
+		header, byte(payloadLen), crcByte, iq); err != nil {
 		return err
 	}
 
@@ -293,6 +301,9 @@ func (d *SX126x) setPacketParamsLoRa(preambleLen uint16, explicitHeader bool, pa
 func (d *SX126x) SetSyncWord(syncWord uint16) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.requireDisarmed(); err != nil {
+		return err
+	}
 	return d.writeRegister(regLoRaSyncWordMSB, []byte{byte(syncWord >> 8), byte(syncWord)})
 }
 
@@ -321,11 +332,9 @@ func (d *SX126x) Transmit(payload []byte, timeout time.Duration) error {
 		if err := d.setStandby(StandbyRC); err != nil {
 			return err
 		}
-		defer func() {
-			if err := d.resumeRx(); err != nil {
-				d.recvErr = err
-			}
-		}()
+		// A failed re-arm leaves recvArmed false, which the modem's watchdog
+		// acts on; it must not mask the transmit's own result.
+		defer func() { _ = d.resumeRx() }()
 	}
 	return d.transmit(payload, timeout)
 }
@@ -378,6 +387,15 @@ func (d *SX126x) transmit(payload []byte, timeout time.Duration) error {
 	return nil
 }
 
+// requireDisarmed refuses a change to the demodulator while the receiver is
+// armed; the caller stops receiving first. Holds d.mu.
+func (d *SX126x) requireDisarmed() error {
+	if d.recvArmed {
+		return errors.New("sx126x: busy receiving continuously; call Halt first")
+	}
+	return nil
+}
+
 // requireLoRa reports whether the packet path can run: it programs the LoRa
 // register layout, which in FSK would configure the wrong fields. Holds d.mu.
 func (d *SX126x) requireLoRa(op string) error {
@@ -399,7 +417,6 @@ func (d *SX126x) resumeRx() error {
 		return err
 	}
 	d.recvArmed = true
-	d.recvErr = nil
 	return nil
 }
 
@@ -462,7 +479,6 @@ func (d *SX126x) ResumeReceive() error {
 		return errors.New("sx126x: not receiving continuously")
 	}
 	if err := d.resumeRx(); err != nil {
-		d.recvErr = err
 		return err
 	}
 	return nil

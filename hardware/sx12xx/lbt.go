@@ -159,7 +159,6 @@ func (d *SX126x) ResetAGC() error {
 
 	if receiving {
 		if err := d.resumeRx(); err != nil {
-			d.recvErr = err
 			return err
 		}
 	}
@@ -205,7 +204,6 @@ func (d *SX127x) ResetAGC() error {
 	}
 	if receiving {
 		if err := d.resumeRx(); err != nil {
-			d.recvErr = err
 			return err
 		}
 	}
@@ -253,7 +251,6 @@ func (d *SX126x) ScanChannel() (bool, error) {
 	_ = d.clearIrqStatus(IRQAll)
 	if receiving {
 		if rerr := d.resumeRx(); rerr != nil {
-			d.recvErr = rerr
 			return busy, rerr
 		}
 	}

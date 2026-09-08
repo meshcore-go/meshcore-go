@@ -367,11 +367,9 @@ func (d *SX127x) Transmit(payload []byte, timeout time.Duration) error {
 	if d.stop != nil {
 		// Standby and the re-arm below would discard an already-received packet.
 		d.drainPending()
-		defer func() {
-			if err := d.resumeRx(); err != nil {
-				d.recvErr = err
-			}
-		}()
+		// A failed re-arm leaves recvArmed false, which the modem's watchdog
+		// acts on; it must not mask the transmit's own result.
+		defer func() { _ = d.resumeRx() }()
 	}
 	return d.transmit(payload, timeout)
 }
@@ -440,7 +438,6 @@ func (d *SX127x) resumeRx() error {
 		return err
 	}
 	d.recvArmed = true
-	d.recvErr = nil
 	return nil
 }
 
@@ -505,7 +502,6 @@ func (d *SX127x) ResumeReceive() error {
 		return errors.New("sx127x: not receiving continuously")
 	}
 	if err := d.resumeRx(); err != nil {
-		d.recvErr = err
 		return err
 	}
 	return nil

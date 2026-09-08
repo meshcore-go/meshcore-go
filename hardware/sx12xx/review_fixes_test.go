@@ -354,6 +354,7 @@ func TestCommandStatusFailureIsSurfaced(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			chip := &fakeChip{cmdStatus: tc.status}
 			d := newTestSX126x(chip, 1)
+			d.recvArmed = false // configuration happens with the receiver down
 
 			err := d.SetFrequency(869525000)
 			if got := errors.Is(err, ErrCommandFailed); got != tc.want {
@@ -415,4 +416,52 @@ func TestLoRaPacketPathRefusesFskMode(t *testing.T) {
 			t.Errorf("Transmit in FSK mode = %v, want ErrNotLoRaModem", err)
 		}
 	})
+}
+
+func TestSX126xRefusesReconfigurationWhileReceiving(t *testing.T) {
+	chip := &fakeChip{}
+	d := newTestSX126x(chip, 1)
+
+	// Armed: the SX127x already refuses this, and changing the demodulator
+	// underneath a live receiver is no more valid on the SX126x.
+	if err := d.SetModulationParams(7, Bandwidth(250000), CodingRate(5), true); err == nil {
+		t.Error("SetModulationParams was allowed while the receiver was armed")
+	}
+	if err := d.SetFrequency(869525000); err == nil {
+		t.Error("SetFrequency was allowed while the receiver was armed")
+	}
+
+	// Disarmed with the goroutine still running: what recovery looks like.
+	d.recvArmed = false
+	if err := d.SetFrequency(869525000); err != nil {
+		t.Errorf("SetFrequency refused while the receiver was down: %v", err)
+	}
+	if err := d.SetModulationParams(7, Bandwidth(250000), CodingRate(5), true); err != nil {
+		t.Errorf("SetModulationParams refused while the receiver was down: %v", err)
+	}
+}
+
+func TestModulationAndPacketParamsSendDatasheetLengths(t *testing.T) {
+	chip := &fakeChip{}
+	d := newTestSX126x(chip, 1)
+	d.recvArmed = false
+
+	if err := d.SetModulationParams(7, Bandwidth(250000), CodingRate(5), true); err != nil {
+		t.Fatalf("SetModulationParams: %v", err)
+	}
+	if err := d.SetPacketParams(8, true, true, false); err != nil {
+		t.Fatalf("SetPacketParams: %v", err)
+	}
+	for _, c := range chip.calls {
+		switch c[0] {
+		case opSetModulationParams:
+			if len(c) != 1+4 {
+				t.Errorf("SetModulationParams sent %d parameter bytes, want 4", len(c)-1)
+			}
+		case opSetPacketParams:
+			if len(c) != 1+6 {
+				t.Errorf("SetPacketParams sent %d parameter bytes, want 6", len(c)-1)
+			}
+		}
+	}
 }
