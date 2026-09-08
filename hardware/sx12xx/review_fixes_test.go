@@ -296,3 +296,43 @@ func TestConfigurationLostReadsTheChipNotOurState(t *testing.T) {
 		}
 	})
 }
+
+func TestSX127xSettersGateOnTheReceiverNotTheGoroutine(t *testing.T) {
+	regs := &fakeRegs{regs: map[byte]byte{}}
+	d := newTestSX127x(regs, 1)
+
+	// Armed: reconfiguring underneath a live receiver stays refused.
+	if err := d.SetFrequency(869525000); err == nil {
+		t.Error("SetFrequency was allowed while the receiver was armed")
+	}
+
+	// Disarmed with the goroutine still running, which is what recovery from a
+	// chip reset looks like. Gating on d.stop here made recovery impossible.
+	d.recvArmed = false
+	if err := d.SetFrequency(869525000); err != nil {
+		t.Errorf("SetFrequency refused while the receiver was down: %v", err)
+	}
+	if err := d.SetModulationParams(7, Bandwidth(250000), CodingRate(5), true); err != nil {
+		t.Errorf("SetModulationParams refused while the receiver was down: %v", err)
+	}
+	if err := d.SetPacketParams(16, true, true, false); err != nil {
+		t.Errorf("SetPacketParams refused while the receiver was down: %v", err)
+	}
+}
+
+func TestResetAGCRestoresTheTxClampMarker(t *testing.T) {
+	chip := &fakeChip{clamp: 0x1E, clearClampOnSleep: true}
+	d := newTestSX126x(chip, 1)
+
+	if err := d.ResetAGC(); err != nil {
+		t.Fatalf("ResetAGC: %v", err)
+	}
+	// Left dropped, every AGC reset would look like a chip reset and trigger a
+	// full reconfigure under live traffic.
+	if chip.clamp&0x1E != 0x1E {
+		t.Errorf("TX clamp = %#02x after ResetAGC, want bits 4:1 set", chip.clamp)
+	}
+	if lost, err := d.ConfigurationLost(); err != nil || lost {
+		t.Errorf("ConfigurationLost = %v (err %v) after a normal AGC reset, want false", lost, err)
+	}
+}

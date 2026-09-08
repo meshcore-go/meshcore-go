@@ -327,12 +327,7 @@ func (d *SX126x) begin() error {
 		return err
 	}
 
-	// Antenna-resistance workaround.
-	clamp, err := d.readRegister(regTxClampConfig, 1)
-	if err != nil {
-		return err
-	}
-	if err := d.writeRegister(regTxClampConfig, []byte{clamp[0] | 0x1E}); err != nil {
+	if err := d.applyTxClamp(); err != nil {
 		return err
 	}
 	if err := d.setBufferBaseAddress(0, 0); err != nil {
@@ -668,6 +663,27 @@ func (d *SX126x) ConfigurationLost() (bool, error) {
 		return false, err
 	}
 	return r[0]&0x1E != 0x1E, nil
+}
+
+// applyTxClamp applies the antenna-resistance workaround. It doubles as the
+// marker ConfigurationLost reads, so anything that reconfigures must call it.
+// Holds d.mu.
+func (d *SX126x) applyTxClamp() error {
+	clamp, err := d.readRegister(regTxClampConfig, 1)
+	if err != nil {
+		return err
+	}
+	return d.writeRegister(regTxClampConfig, []byte{clamp[0] | 0x1E})
+}
+
+// Reinitialize runs bring-up again on a chip that has lost its configuration.
+// Only the settings begin owns are restored: the caller reapplies the
+// modulation and packet parameters, which the driver does not retain.
+func (d *SX126x) Reinitialize() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recvArmed = false
+	return d.begin()
 }
 
 // applyFEMRxPatch sets register 0x08B5 bit 0 when the board needs it. Holds d.mu.

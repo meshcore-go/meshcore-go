@@ -84,7 +84,7 @@ func sx127xSfBits(sf int) (byte, bool) {
 func (d *SX127x) SetFrequency(hz uint32) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stop != nil {
+	if d.recvArmed {
 		return errors.New("sx127x: busy receiving continuously")
 	}
 	if err := d.setFrequency(hz); err != nil {
@@ -199,7 +199,7 @@ func ocpTrim(mA int) byte {
 func (d *SX127x) SetModulationParams(sf int, bw Bandwidth, cr CodingRate, ldroAuto bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stop != nil {
+	if d.recvArmed {
 		return errors.New("sx127x: busy receiving continuously")
 	}
 
@@ -270,7 +270,7 @@ func (d *SX127x) SetModulationParams(sf int, bw Bandwidth, cr CodingRate, ldroAu
 func (d *SX127x) SetPacketParams(preambleLen uint16, explicitHeader bool, crc bool, invertIq bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stop != nil {
+	if d.recvArmed {
 		return errors.New("sx127x: busy receiving continuously")
 	}
 

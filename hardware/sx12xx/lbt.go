@@ -151,6 +151,11 @@ func (d *SX126x) ResetAGC() error {
 	if err := d.applyFEMRxPatch(); err != nil {
 		return err
 	}
+	// Warm-start sleep retains registers selectively, so do not assume the
+	// clamp survived; it is also the marker ConfigurationLost reads.
+	if err := d.applyTxClamp(); err != nil {
+		return err
+	}
 
 	if receiving {
 		if err := d.resumeRx(); err != nil {

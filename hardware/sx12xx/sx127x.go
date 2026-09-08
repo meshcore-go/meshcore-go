@@ -195,6 +195,16 @@ func (d *SX127x) ConfigurationLost() (bool, error) {
 	return v&0x03 != lnaBoostHfOn, nil
 }
 
+// Reinitialize runs bring-up again on a chip that has lost its configuration.
+// Only the settings begin owns are restored: the caller reapplies the
+// modulation and packet parameters, which the driver does not retain.
+func (d *SX127x) Reinitialize() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recvArmed = false
+	return d.begin()
+}
+
 // begin runs bring-up; it takes no lock, being called before d is published.
 func (d *SX127x) begin() error {
 	if err := d.reset_(); err != nil {

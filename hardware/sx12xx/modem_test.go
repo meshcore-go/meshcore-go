@@ -17,22 +17,25 @@ import (
 var _ node.Modem = (*Modem)(nil)
 
 type fakeRadio struct {
-	mu            sync.Mutex
-	packets       chan Packet
-	busy          bool
-	busyErr       error
-	rssi          float64
-	sent          [][]byte
-	sentBusy      []bool // channel-busy state at the moment of each send
-	halted        bool
-	agcCount      int
-	inRecv        bool
-	resumeErr     error
-	configLost    bool
-	configLostErr error
-	freqSets      int
-	resumes       int
-	droppedCnt    uint64
+	mu               sync.Mutex
+	packets          chan Packet
+	busy             bool
+	busyErr          error
+	rssi             float64
+	sent             [][]byte
+	sentBusy         []bool // channel-busy state at the moment of each send
+	halted           bool
+	agcCount         int
+	inRecv           bool
+	resumeErr        error
+	configLost       bool
+	configLostErr    error
+	freqSets         int
+	reinitErr        error
+	reinits          int
+	reinitLeavesLost bool
+	resumes          int
+	droppedCnt       uint64
 
 	freq            uint32
 	power           int
@@ -106,6 +109,27 @@ func (f *fakeRadio) ConfigurationLost() (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.configLost, f.configLostErr
+}
+
+// Reinitialize models bring-up: a chip that comes back clears the marker,
+// which is what makes non-convergence visible to these tests.
+func (f *fakeRadio) Reinitialize() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reinits++
+	if f.reinitErr != nil {
+		return f.reinitErr
+	}
+	if !f.reinitLeavesLost {
+		f.configLost = false
+	}
+	return nil
+}
+
+func (f *fakeRadio) reinitCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reinits
 }
 
 func (f *fakeRadio) setConfigLost(v bool) {
@@ -793,24 +817,62 @@ func TestResetChipIsReconfiguredEvenThoughItLooksArmed(t *testing.T) {
 	f.setInRecv(true)
 	f.setConfigLost(true)
 
+	// RecvRecoveries is incremented last, so it is the only safe thing to wait
+	// on: the earlier steps are visible before the recovery has finished.
 	deadline := time.Now().Add(3 * time.Second)
-	for f.configureCount() == applied && time.Now().Before(deadline) {
+	for m.RecvRecoveries() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
+	if m.RecvRecoveries() == 0 {
+		t.Fatal("a chip that lost its configuration was never recovered")
+	}
 	if f.configureCount() == applied {
-		t.Fatal("a chip that lost its configuration was never reconfigured")
+		t.Error("recovered without reapplying the radio configuration")
 	}
 	if f.resumeCount() == 0 {
-		t.Error("reconfigured without re-arming the receiver")
+		t.Error("recovered without re-arming the receiver")
 	}
-	if m.RecvRecoveries() == 0 {
-		t.Error("recovery was not counted")
+	if f.reinitCount() == 0 {
+		t.Error("recovered without re-running the driver's bring-up")
+	}
+
+	// A recovery that does not clear the marker would run on every tick.
+	time.Sleep(300 * time.Millisecond)
+	if n := f.reinitCount(); n != 1 {
+		t.Errorf("re-initialised %d times for one reset, want 1", n)
+	}
+	if n := m.RecvRecoveries(); n != 1 {
+		t.Errorf("counted %d recoveries for one reset, want 1", n)
+	}
+}
+
+func TestAChipThatNeverClearsTheMarkerIsDeclaredDead(t *testing.T) {
+	f := newFakeRadio()
+	// Bring-up succeeds but the chip still reports its reset configuration:
+	// recovery must count as failed rather than spin.
+	f.reinitLeavesLost = true
+	m, err := NewModem(f, meshcoreConfig(), withRecvWatchdog(time.Second, 5*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewModem: %v", err)
+	}
+	defer m.Close()
+
+	f.setInRecv(true)
+	f.setConfigLost(true)
+
+	select {
+	case <-m.Dead():
+	case <-time.After(3 * time.Second):
+		t.Fatal("a chip that kept reporting its reset state was never declared dead")
+	}
+	if n := m.RecvRecoveries(); n != 0 {
+		t.Errorf("counted %d recoveries for a chip that never recovered, want 0", n)
 	}
 }
 
 func TestChipThatCannotBeReconfiguredIsDeclaredDead(t *testing.T) {
 	f := newFakeRadio()
-	f.resumeErr = errors.New("spi timeout")
+	f.reinitErr = errors.New("spi timeout")
 	m, err := NewModem(f, meshcoreConfig(), withRecvWatchdog(time.Second, 5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewModem: %v", err)

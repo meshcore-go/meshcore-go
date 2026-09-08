@@ -74,6 +74,9 @@ type Radio interface {
 // fallen back to its reset state.
 type ResetDetector interface {
 	ConfigurationLost() (bool, error)
+	// Reinitialize restores the settings the driver's own bring-up owns. The
+	// modulation and packet parameters are the caller's to reapply.
+	Reinitialize() error
 }
 
 // ChannelScanner is a Radio that can run a hardware channel-activity detection.
@@ -648,9 +651,17 @@ func (m *Modem) reconfigureIfReset(failures *int) bool {
 	if !m.sendMu.TryLock() {
 		return true
 	}
-	err = m.configure(m.radioCfg)
+	// Bring-up belongs to the driver, which alone knows the regulator, RF
+	// switch, TCXO and errata state; the parameters below are ours.
+	err = m.detector.Reinitialize()
+	if err == nil {
+		err = m.configure(m.radioCfg)
+	}
 	if err == nil {
 		err = m.radio.ResumeReceive()
+	}
+	if err == nil {
+		err = m.confirmRecovered()
 	}
 	m.sendMu.Unlock()
 	if err != nil {
@@ -664,6 +675,19 @@ func (m *Modem) reconfigureIfReset(failures *int) bool {
 	m.recvRecoveries.Add(1)
 	m.log.Warn("sx12xx: radio had reset itself, reconfigured and re-armed")
 	return true
+}
+
+// confirmRecovered rejects a recovery the chip did not actually take, so a
+// marker that never clears counts as a failure instead of spinning every tick.
+func (m *Modem) confirmRecovered() error {
+	lost, err := m.detector.ConfigurationLost()
+	if err != nil {
+		return err
+	}
+	if lost {
+		return errors.New("chip still reports its reset configuration")
+	}
+	return nil
 }
 
 // Dead returns a channel closed once the radio has failed to re-arm receive

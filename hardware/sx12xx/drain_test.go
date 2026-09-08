@@ -28,6 +28,7 @@ type fakeChip struct {
 	rxGain               byte
 	femPatch             byte
 	clamp                byte
+	clearClampOnSleep    bool
 	asleep               bool
 	devErrors            uint16
 	cadDetect            bool
@@ -68,6 +69,9 @@ func (c *fakeChip) Tx(w, r []byte) error {
 		}
 	case opSetSleep:
 		c.asleep = true
+		if c.clearClampOnSleep {
+			c.clamp = 0 // warm-start retention is selective
+		}
 		// Restarting the oscillator latches XOSC_START_ERR; errors are sticky.
 		c.devErrors |= DeviceErrXoscStart
 	case opGetDeviceErrors:
