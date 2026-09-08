@@ -23,12 +23,14 @@ type fakeChip struct {
 	// failOp makes that one opcode fail.
 	failOp byte
 
-	ops                  []byte   // opcode order
-	calls                [][]byte // full command bytes
-	rxGain               byte
-	femPatch             byte
-	clamp                byte
-	clearClampOnSleep    bool
+	ops               []byte   // opcode order
+	calls             [][]byte // full command bytes
+	rxGain            byte
+	femPatch          byte
+	clamp             byte
+	clearClampOnSleep bool
+	// cmdStatus is the byte GetStatus returns; the failure codes are in bits 3:1.
+	cmdStatus            byte
 	asleep               bool
 	devErrors            uint16
 	cadDetect            bool
@@ -101,6 +103,8 @@ func (c *fakeChip) Tx(w, r []byte) error {
 		r[2], r[3], r[4] = 100, 20, 100
 	case opSetTx:
 		c.irq |= IRQTxDone
+	case opGetStatus:
+		r[1] = c.cmdStatus
 	}
 	return nil
 }
@@ -125,7 +129,7 @@ func (p *busyPin) Read() gpio.Level {
 // newTestSX126x builds a driver already in continuous receive.
 func newTestSX126x(chip *fakeChip, buffer int) *SX126x {
 	busy := &busyPin{Pin: &gpiotest.Pin{N: "BUSY", L: gpio.Low}, chip: chip}
-	d := &SX126x{c: chip, busy: busy}
+	d := &SX126x{c: chip, busy: busy, packetType: PacketTypeLoRa}
 	d.opts.BusyTimeout = time.Millisecond
 	d.preambleLen, d.explicitHeader, d.crcOn, d.payloadLen = 8, true, true, 0xFF
 	d.packets = make(chan Packet, buffer)

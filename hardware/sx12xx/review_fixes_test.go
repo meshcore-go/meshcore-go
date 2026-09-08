@@ -1,6 +1,7 @@
 package sx12xx
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -335,4 +336,83 @@ func TestResetAGCRestoresTheTxClampMarker(t *testing.T) {
 	if lost, err := d.ConfigurationLost(); err != nil || lost {
 		t.Errorf("ConfigurationLost = %v (err %v) after a normal AGC reset, want false", lost, err)
 	}
+}
+
+func TestCommandStatusFailureIsSurfaced(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status byte
+		want   bool
+	}{
+		{"healthy standby", StatusModeStandbyRC, false},
+		{"command timed out", StatusModeStandbyRC | StatusCmdTimeout, true},
+		{"command rejected", StatusModeStandbyRC | StatusCmdError, true},
+		{"command failed to execute", StatusModeStandbyRC | StatusCmdFailedExec, true},
+		{"data available is not a failure", StatusModeRx | StatusCmdDataAvailable, false},
+		{"tx done is not a failure", StatusModeTx | StatusCmdTxDone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chip := &fakeChip{cmdStatus: tc.status}
+			d := newTestSX126x(chip, 1)
+
+			err := d.SetFrequency(869525000)
+			if got := errors.Is(err, ErrCommandFailed); got != tc.want {
+				t.Errorf("SetFrequency error = %v, want ErrCommandFailed=%v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSleepDoesNotReadStatusBack(t *testing.T) {
+	// A sleeping chip holds BUSY high, so a status read after SetSleep would
+	// wait on a line only the next transmission can release.
+	chip := &fakeChip{}
+	d := newTestSX126x(chip, 1)
+	d.stop = nil
+
+	if err := d.Sleep(); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+	slept := -1
+	for i, op := range chip.ops {
+		if op == opSetSleep {
+			slept = i
+			break
+		}
+	}
+	if slept < 0 {
+		t.Fatal("Sleep never issued SetSleep")
+	}
+	for _, op := range chip.ops[slept+1:] {
+		if op == opGetStatus {
+			t.Fatal("status was read back after SetSleep, which cannot answer while asleep")
+		}
+	}
+}
+
+func TestLoRaPacketPathRefusesFskMode(t *testing.T) {
+	// The FSK helpers configure the modem but leave Transmit programming the
+	// LoRa register layout, which would silently configure the wrong fields.
+	t.Run("sx126x", func(t *testing.T) {
+		chip := &fakeChip{}
+		d := newTestSX126x(chip, 1)
+		d.stop = nil
+		d.packetType = PacketTypeFSK
+
+		if err := d.Transmit([]byte{1, 2, 3}, time.Second); !errors.Is(err, ErrNotLoRaModem) {
+			t.Errorf("Transmit in FSK mode = %v, want ErrNotLoRaModem", err)
+		}
+	})
+
+	t.Run("sx127x", func(t *testing.T) {
+		regs := &fakeRegs{regs: map[byte]byte{}}
+		d := newTestSX127x(regs, 1)
+		d.stop = nil
+		d.recvArmed = false
+		d.longRange = false
+
+		if err := d.Transmit([]byte{1, 2, 3}, time.Second); !errors.Is(err, ErrNotLoRaModem) {
+			t.Errorf("Transmit in FSK mode = %v, want ErrNotLoRaModem", err)
+		}
+	})
 }

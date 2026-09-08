@@ -52,7 +52,7 @@ func (f *fakeRegs) Duplex() conn.Duplex          { return conn.Full }
 func (f *fakeRegs) String() string               { return "fakeRegs" }
 
 func newTestSX127x(regs *fakeRegs, buffer int) *SX127x {
-	d := &SX127x{c: regs, dio0: &gpiotest.Pin{N: "DIO0", L: gpio.Low}}
+	d := &SX127x{c: regs, dio0: &gpiotest.Pin{N: "DIO0", L: gpio.Low}, longRange: true}
 	d.packets = make(chan Packet, buffer)
 	d.stop = make(chan struct{})
 	d.recvArmed = true

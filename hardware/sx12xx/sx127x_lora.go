@@ -360,6 +360,10 @@ func (d *SX127x) Transmit(payload []byte, timeout time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if err := d.requireLoRa("transmit"); err != nil {
+		return err
+	}
+
 	if d.stop != nil {
 		// Standby and the re-arm below would discard an already-received packet.
 		d.drainPending()
@@ -413,6 +417,15 @@ func (d *SX127x) transmit(payload []byte, timeout time.Duration) error {
 	d.nSent.Add(1)
 	d.txLed.blink()
 	return d.setMode(modeStandby)
+}
+
+// requireLoRa reports whether the packet path can run: it programs the LoRa
+// register layout, which in FSK would configure the wrong fields. Holds d.mu.
+func (d *SX127x) requireLoRa(op string) error {
+	if !d.longRange {
+		return fmt.Errorf("sx127x: %s: %w", op, ErrNotLoRaModem)
+	}
+	return nil
 }
 
 // resumeRx returns the receiver to continuous mode; caller holds d.mu.

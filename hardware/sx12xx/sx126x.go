@@ -351,12 +351,39 @@ func (d *SX126x) busyWait() error {
 	return nil
 }
 
-// command issues a write-only command once BUSY has cleared.
+// command issues a write-only command once BUSY has cleared, then reads back
+// the status the chip recorded for it. Without that read a rejected command is
+// indistinguishable from an accepted one.
 func (d *SX126x) command(opcode byte, params ...byte) error {
 	if err := d.busyWait(); err != nil {
 		return err
 	}
-	return d.commandNow(opcode, params...)
+	if err := d.commandNow(opcode, params...); err != nil {
+		return err
+	}
+	// A sleeping chip holds BUSY high until the next NSS edge, so the status
+	// read would wait on a line only its own transmission could release.
+	if opcode == opSetSleep {
+		return nil
+	}
+	return d.checkStatus(opcode)
+}
+
+// checkStatus reports a command the chip refused. Holds d.mu.
+func (d *SX126x) checkStatus(opcode byte) error {
+	st, err := d.getStatus()
+	if err != nil {
+		return err
+	}
+	switch st & StatusCmdMask {
+	case StatusCmdTimeout:
+		return fmt.Errorf("sx126x: command %#02x: %w: timed out", opcode, ErrCommandFailed)
+	case StatusCmdError:
+		return fmt.Errorf("sx126x: command %#02x: %w: rejected as invalid", opcode, ErrCommandFailed)
+	case StatusCmdFailedExec:
+		return fmt.Errorf("sx126x: command %#02x: %w: failed to execute", opcode, ErrCommandFailed)
+	}
+	return nil
 }
 
 // commandNow issues a command without first waiting for BUSY. Holds d.mu.
